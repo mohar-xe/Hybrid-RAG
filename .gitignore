@@ -5,6 +5,8 @@
 
 # Data folder (personal)
 data/
+tests/
+docs/
 
 # Dependencies
 node_modules/
