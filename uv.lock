@@ -583,53 +583,6 @@ wheels = [
 ]
 
 [[package]]
-name = "grey"
-version = "0.1.0"
-source = { virtual = "." }
-dependencies = [
-    { name = "arxiv" },
-    { name = "chromadb" },
-    { name = "dotenv" },
-    { name = "gliner" },
-    { name = "ipykernel" },
-    { name = "keybert" },
-    { name = "kuzu" },
-    { name = "openai" },
-    { name = "pgvector" },
-    { name = "psycopg" },
-    { name = "pydantic" },
-    { name = "pypdf" },
-    { name = "regex" },
-    { name = "rich" },
-    { name = "sentence-transformers" },
-    { name = "uuid" },
-    { name = "youtube-transcript-api" },
-    { name = "yt-dlp" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "arxiv", specifier = ">=2.4.1" },
-    { name = "chromadb", specifier = ">=1.5.5" },
-    { name = "dotenv", specifier = ">=0.9.9" },
-    { name = "gliner", specifier = ">=0.2.26" },
-    { name = "ipykernel", specifier = ">=7.2.0" },
-    { name = "keybert", specifier = ">=0.9.0" },
-    { name = "kuzu", specifier = ">=0.11.3" },
-    { name = "openai", specifier = ">=2.30.0" },
-    { name = "pgvector", specifier = ">=0.4.2" },
-    { name = "psycopg", specifier = ">=3.3.3" },
-    { name = "pydantic", specifier = ">=2.12.5" },
-    { name = "pypdf", specifier = ">=6.9.2" },
-    { name = "regex", specifier = ">=2026.2.28" },
-    { name = "rich", specifier = ">=14.3.3" },
-    { name = "sentence-transformers", specifier = ">=5.3.0" },
-    { name = "uuid", specifier = ">=1.30" },
-    { name = "youtube-transcript-api", specifier = ">=1.2.4" },
-    { name = "yt-dlp", specifier = ">=2026.3.17" },
-]
-
-[[package]]
 name = "grpcio"
 version = "1.78.0"
 source = { registry = "https://pypi.org/simple" }
@@ -786,6 +739,53 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/19/15/eafc1c57bf0f8afffb243dcd4c0cceb785e956acc17bba4d9bf2ae21fc9c/huggingface_hub-1.7.2.tar.gz", hash = "sha256:7f7e294e9bbb822e025bdb2ada025fa4344d978175a7f78e824d86e35f7ab43b", size = 724684, upload-time = "2026-03-20T10:36:08.767Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/08/de/3ad061a05f74728927ded48c90b73521b9a9328c85d841bdefb30e01fb85/huggingface_hub-1.7.2-py3-none-any.whl", hash = "sha256:288f33a0a17b2a73a1359e2a5fd28d1becb2c121748c6173ab8643fb342c850e", size = 618036, upload-time = "2026-03-20T10:36:06.824Z" },
+]
+
+[[package]]
+name = "hybrid-rag"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "arxiv" },
+    { name = "chromadb" },
+    { name = "dotenv" },
+    { name = "gliner" },
+    { name = "ipykernel" },
+    { name = "keybert" },
+    { name = "kuzu" },
+    { name = "openai" },
+    { name = "pgvector" },
+    { name = "psycopg" },
+    { name = "pydantic" },
+    { name = "pypdf" },
+    { name = "regex" },
+    { name = "rich" },
+    { name = "sentence-transformers" },
+    { name = "uuid" },
+    { name = "youtube-transcript-api" },
+    { name = "yt-dlp" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "arxiv", specifier = ">=2.4.1" },
+    { name = "chromadb", specifier = ">=1.5.5" },
+    { name = "dotenv", specifier = ">=0.9.9" },
+    { name = "gliner", specifier = ">=0.2.26" },
+    { name = "ipykernel", specifier = ">=7.2.0" },
+    { name = "keybert", specifier = ">=0.9.0" },
+    { name = "kuzu", specifier = ">=0.11.3" },
+    { name = "openai", specifier = ">=2.30.0" },
+    { name = "pgvector", specifier = ">=0.4.2" },
+    { name = "psycopg", specifier = ">=3.3.3" },
+    { name = "pydantic", specifier = ">=2.12.5" },
+    { name = "pypdf", specifier = ">=6.9.2" },
+    { name = "regex", specifier = ">=2026.2.28" },
+    { name = "rich", specifier = ">=14.3.3" },
+    { name = "sentence-transformers", specifier = ">=5.3.0" },
+    { name = "uuid", specifier = ">=1.30" },
+    { name = "youtube-transcript-api", specifier = ">=1.2.4" },
+    { name = "yt-dlp", specifier = ">=2026.3.17" },
 ]
 
 [[package]]
