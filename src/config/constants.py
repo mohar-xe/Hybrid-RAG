@@ -4,10 +4,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-BASE_URL = "https://integrate.api.nvidia.com/v1"
-EMBED_MODEL = "nvidia/nv-embed-v1"
-NER_MODEL = "meta/llama-3.1-8b-instruct"
-GENERATOR_MODEL = "nvidia/llama-3.3-nemotron-super-49b-v1.5"
+BASE_URL = "https://openrouter.ai/api/v1"
+EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+NER_MODEL = "google/gemma-4-27b-it"
+GENERATOR_MODEL = "google/gemma-4-27b-it"
 
 
 def _build_db_conn() -> str:

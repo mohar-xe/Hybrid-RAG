@@ -1,14 +1,13 @@
 import os
-import json
-import re
-from typing import Any
 
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from graph.schema import KnowledgeGraph
+
 load_dotenv()
 
-api_key = os.environ.get("NIM_API_KEY")
+api_key = os.environ.get("ROUTER_API_KEY")
 from config.constants import BASE_URL, NER_MODEL
 
 client = OpenAI(
@@ -16,81 +15,32 @@ client = OpenAI(
     base_url=BASE_URL
     )
 
-SYSTEM_PROMPT = """You are an expert information extraction engine. Your sole task is to analyze the provided text and extract all named entities and abstract concepts from it.
-
-Return your output as a valid JSON object with exactly this structure:
-{
-  "entities": [],
-  "concepts": []
-}
-
-Definitions:
-- "entities": Specific, named real-world objects - people, organizations, locations, products, events, dates, technologies, etc.
-- "concepts": Abstract or generalized ideas, themes, theories, phenomena, or domain knowledge referenced in the text.
-
-Rules:
-1. Output ONLY the raw JSON object. No preamble, explanation, markdown, or code fences.
-2. Each item must be a short noun phrase (1 to 4 words max).
-3. No duplicates. Normalize case (title case for entities, lowercase for concepts).
-4. If a category has no items, return an empty array [].
-5. Do not infer or hallucinate - extract only what is explicitly present or strongly implied in the text.
+SYSTEM_PROMPT = """You are a high-precision Knowledge Graph Extraction Engine. Your goal is to extract a comprehensive ontology from the provided text to populate a Kùzu graph database.
+Instructions:
+    1) Entity Extraction: Identify every distinct entity. Assign a label that matches its semantic category and a description that captures its essence in the text.
+    2) Relationship Mapping: Identify all connections between entities.
+    3) Weighting: Assign a weight (0.0 to 1.0) based on how central the relationship is to the core narrative of the text.
+    Deduplication: Ensure the same entity is not extracted twice under different names. Use the most formal name as the primary name.
+Strict Rule: Output MUST strictly follow the provided JSON schema. Do not include any conversational filler.
 """
 
+kuzu_schema = KnowledgeGraph.model_json_schema()
 
-def _parse_json_object(raw_content: str) -> dict[str, Any]:
-  cleaned = raw_content.strip()
-  if not cleaned:
-    return {"entities": [], "concepts": []}
-
-  try:
-    return json.loads(cleaned)
-  except json.JSONDecodeError:
-    pass
-
-  match = re.search(r"\{[\s\S]*\}", cleaned)
-  if not match:
-    return {"entities": [], "concepts": []}
-
-  try:
-    return json.loads(match.group(0))
-  except json.JSONDecodeError:
-    return {"entities": [], "concepts": []}
+tool = {
+  "name": "extract_knowledge_graph",
+  "description": "Extracts a structured knowledge graph from unstructured text, identifying entities and",
+  "input_schema": kuzu_schema,
+}
 
 
-def _normalize_items(items: Any, *, lowercase: bool) -> list[str]:
-  if not isinstance(items, list):
-    return []
-
-  seen: set[str] = set()
-  normalized: list[str] = []
-
-  for item in items:
-    if not isinstance(item, str):
-      continue
-
-    value = " ".join(item.split()).strip()
-    if not value:
-      continue
-
-    if lowercase:
-      value = value.lower()
-
-    dedupe_key = value.casefold()
-    if dedupe_key in seen:
-      continue
-
-    seen.add(dedupe_key)
-    normalized.append(value)
-
-  return normalized
-
-
-def extract_entities_concepts(text: str) -> dict[str, list[str]]:
+def extract_entities_concepts(text: str) -> list[dict]:
   if not text or not text.strip():
-    return {"entities": [], "concepts": []}
+    return []
 
   response = client.chat.completions.create(
       model=NER_MODEL,
+      tools=[{"type": "function", "function": {"name": tool["name"], "description": tool["description"], "parameters": tool["input_schema"]}}],
+      tool_choice={"type": "function", "function": {"name": "extract_knowledge_graph"}},
       messages=[
           {"role": "system", "content": SYSTEM_PROMPT},
           {"role": "user", "content": text}
@@ -99,16 +49,20 @@ def extract_entities_concepts(text: str) -> dict[str, list[str]]:
       max_tokens=2048
   )
 
-  content = response.choices[0].message.content or ""
-  parsed = _parse_json_object(content)
+  try:
+      tool_calls = response.choices[0].message.tool_calls
+      if tool_calls:
+          import json
+          args = json.loads(tool_calls[0].function.arguments)
+          return args.get("entities", [])
+      else:
+          # Fallback if the model returned content instead of a tool call
+          content = response.choices[0].message.content
+          if content:
+              import json
+              args = json.loads(content)
+              return args.get("entities", [])
+  except Exception as e:
+      print(f"Error parsing completion: {e}")
 
-  entities = _normalize_items(parsed.get("entities", []), lowercase=False)
-  concepts = _normalize_items(parsed.get("concepts", []), lowercase=True)
-
-  return {
-    "entities": entities,
-    "concepts": concepts,
-  }
-
-
-#Need to implement concurrency and rate limiter
+  return []

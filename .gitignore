@@ -16,6 +16,7 @@ node_modules/
 .yarn/install-state.gz
 
 # Build outputs
+hybrid_rag.egg-info
 dist/
 build/
 out/

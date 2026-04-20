@@ -42,7 +42,7 @@ def _split_text(text: str, chunk_size: int, chunk_overlap: int, separators: list
     return chunks
 
 
-def chunk_text(file_path: str, chunk_size: int = 1000, chunk_overlap: int = 200) -> dict:
+def chunk_text(file_path: str, chunk_size: int = 1000, chunk_overlap: int = 200) -> list[dict]:
     
     parsed_text = parse_pdf(file_path)
     text = parsed_text["contents"]

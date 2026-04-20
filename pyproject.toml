@@ -15,6 +15,7 @@ dependencies = [
     "psycopg>=3.3.3",
     "pydantic>=2.12.5",
     "pypdf>=6.9.2",
+    "pytest>=9.0.3",
     "regex>=2026.2.28",
     "rich>=14.3.3",
     "sentence-transformers>=5.3.0",
@@ -22,6 +23,10 @@ dependencies = [
     "youtube-transcript-api>=1.2.4",
     "yt-dlp>=2026.3.17",
 ]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build.backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]

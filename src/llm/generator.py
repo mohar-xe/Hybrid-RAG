@@ -5,7 +5,11 @@ from openai import OpenAI
 
 load_dotenv()
 
-client = OpenAI(api_key=os.environ.get("NIM_API_KEY")) 
+def _get_client() -> OpenAI:
+    api_key = os.getenv("ROUTER_API_KEY")
+    if not api_key:
+        raise RuntimeError("ROUTER_API_KEY is not set in environment variables.")
+    return OpenAI(base_url=BASE_URL, api_key=api_key)
 
 def generate_answer(user_query, retrieved_chunks):
     print("Generating answer...\n")
@@ -25,10 +29,7 @@ def generate_answer(user_query, retrieved_chunks):
     {user_query}
     """
 
-    client = OpenAI(
-    base_url = BASE_URL,
-    api_key = os.getenv("NIM_API_KEY")
-    )
+    client = _get_client()
 
     response = client.chat.completions.create(
     model=GENERATOR_MODEL,
