@@ -1,38 +1,29 @@
-import os
-
-from dotenv import load_dotenv
-
-load_dotenv()
+from pydantic import computed_field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_URL = "https://openrouter.ai/api/v1"
 EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 NER_MODEL = "google/gemma-4-27b-it"
 GENERATOR_MODEL = "google/gemma-4-27b-it"
 
+class DatabaseSettings(BaseSettings):
+    db_host: str = "localhost"
+    db_port: int = 5432
+    db_user: str
+    db_password: str
+    db_name: str
 
-def _build_db_conn() -> str:
-    direct = os.getenv("DB_CONN", "").strip()
-    if direct:
-        return direct
+    @computed_field
+    @property
+    def database_url(self) -> str:
+        return f"postgresql://{self.db_user}:{self.db_password}@{self.db_host}:{self.db_port}/{self.db_name}"
 
-    db = os.getenv("DB", "").strip()
-    user = os.getenv("DB_USER", "").strip()
-    password = os.getenv("DB_PASSWORD", "").strip()
-    host = os.getenv("DB_HOST", "localhost").strip() or "localhost"
-    port = os.getenv("DB_PORT", "5432").strip() or "5432"
+    model_config = SettingsConfigDict(
+        env_file=".env", 
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore"
+    )
 
-    if not (db and user and password):
-        return ""
-
-    return f"dbname={db} user={user} password={password} host={host} port={port}"
-
-
-DB_CONN = _build_db_conn()
-
-
-def get_db_conn() -> str:
-    if not DB_CONN:
-        raise RuntimeError(
-            "Database connection is not configured. Set DB_CONN or DB, DB_USER, DB_PASSWORD."
-        )
-    return DB_CONN
+settings = DatabaseSettings()
+print(settings.database_url)

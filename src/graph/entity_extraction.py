@@ -56,7 +56,6 @@ def extract_entities_concepts(text: str) -> list[dict]:
           args = json.loads(tool_calls[0].function.arguments)
           return args.get("entities", [])
       else:
-          # Fallback if the model returned content instead of a tool call
           content = response.choices[0].message.content
           if content:
               import json

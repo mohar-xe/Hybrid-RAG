@@ -4,6 +4,7 @@ import logging
 
 from sentence_transformers import SentenceTransformer
 
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 LOGGER = logging.getLogger(__name__)
 
 model = SentenceTransformer("all-MiniLM-L6-v2")
@@ -23,7 +24,7 @@ def embed_chunks(chunks: list[Mapping[str, Any]], batch_size: int = 32) -> list[
 
             for chunk, embedding in zip(chunk_batch, batch_embeddings):
                 chunk_with_embedding = dict(chunk)
-                chunk_with_embedding["embedidngs"] = np.array(embedding).astype("float32").tolist()
+                chunk_with_embedding["embeddings"] = np.array(embedding).astype("float32").tolist()
                 enriched_chunks.append(chunk_with_embedding)
         
         LOGGER.info(f"Successfully embedded {total_chunks} chunks in batches of {batch_size}.")

@@ -1,14 +1,19 @@
 import os
+import logging
 from os import path
 from concurrent.futures import ThreadPoolExecutor
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+LOGGER = logging.getLogger(__name__)
 
 from ingestion.chunker import chunk_text
 from embeddings.embedder import embed_chunks
 from graph.entity_extraction import extract_entities_concepts
 from graph.relation_extraction import extract_relations
-from retrieval.graph import KuzuGraphRetriever
+from retrieval.kuzu import KuzuGraphRetriever
 from retrieval.pgvector import store_vector, retrieve_relevant_chunks
-
+from context.builder import build_context
+from llm.generator import generate_with_citations
 
 def ingest(path: str) -> list[dict]:
     if not os.path.isfile(path):
@@ -26,7 +31,6 @@ def add_pgvector(chunks: list[dict]) -> list[dict]:
     return enriched_chunks
 
 def _process_chunk_graph(content: str):
-    """Processes a single chunk: extracts entities, then extracts relationships."""
     entities = extract_entities_concepts(content)
     relations = extract_relations(content, entities)
     return entities, relations
@@ -86,3 +90,22 @@ def add_graph(chunks: list[dict]) -> None:
                     rel_label=rel_type,
                     properties={"weight": weight}
                 )
+
+def query(pdf_path: str, question: str) -> dict:
+
+    LOGGER.info(f"Ingesting {pdf_path}...")
+    chunks = ingest(pdf_path)
+    
+    LOGGER.info("Adding chunks to vector store...")
+    add_pgvector(chunks)
+    
+    LOGGER.info("Building knowledge graph...")
+    add_graph(chunks)
+
+    LOGGER.info(f"Retrieving context for: {question}")
+    retrieved_chunks = retrieve(question, top_k=5)
+
+    LOGGER.info("Generating answer...")
+    result = generate_with_citations(question, retrieved_chunks)
+    
+    return result
