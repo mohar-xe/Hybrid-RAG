@@ -1,0 +1,60 @@
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+.venv
+
+# Data folder (personal)
+data/
+tests/
+docs/
+logs/
+
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+.yarn/install-state.gz
+
+# Build outputs
+hybrid_rag.egg-info
+dist/
+build/
+out/
+.next/
+.nuxt/
+.svelte-kit/
+.turbo/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+coverage/
+
+# Cache
+.cache/
+.parcel-cache/
+.eslintcache
+
+# Internal docs (not for public repo)
+PLAN.md
+GUIDE.md
+__pycache__/
+*.pyc

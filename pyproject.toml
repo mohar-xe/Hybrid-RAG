@@ -1,0 +1,23 @@
+[project]
+name = "hybrid-rag"
+version = "0.1.0"
+description = "A fullfledged Hybrid Graph RAG"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "ipykernel>=7.2.0",
+    "logging>=0.4.9.6",
+    "ollama>=0.6.2",
+    "pydantic-settings>=2.14.1",
+    "pymupdf>=1.27.2.3",
+    "pywhispercpp>=1.4.1",
+    "spacy>=3.8.14",
+    "youtube-transcript-api>=1.2.4",
+    "yt-dlp>=2026.3.17",
+    "psycopg[binary]",
+    "yake>=0.7.3",
+]
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"

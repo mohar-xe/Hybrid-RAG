@@ -1,0 +1,6 @@
+pymupdf
+youtube-transcript-api
+pywhispercpp
+yt-dlp
+logging
+ollama
