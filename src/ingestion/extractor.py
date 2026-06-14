@@ -10,7 +10,6 @@ class Extractor:
     """Later want to add docling or marker.dots.ocr use @classmethod to add more extractors and use a factory pattern to call the right extractor based on the file type or source"""
     def __init__(self) -> None:
         self._whisper = None
-    #PDF will return text only no caching raw_data since it is not needed for future use
     def extract_pdf(self, path: str) -> str:
         if not Path(path).exists():
             raise TextExtractionError(f"File not found: {path}")
@@ -70,7 +69,7 @@ class Extractor:
                 LOGGER.error("Dependency is not installed. Please install it using 'uv add -r requirements.txt'.")
                 raise ImportError("Dependency is not installed. Please install it using 'uv add -r requirements.txt'.")
             self._whisper = Model('base.en', n_threads=os.cpu_count())
-            return self._whisper
+        return self._whisper
 
     def reel_subtitle_extraction(self, path: str) -> str:
         if not Path(path).exists():

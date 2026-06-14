@@ -1,3 +1,10 @@
+"""Typed exception hierarchy.
+
+Every project exception derives from ``BaseError`` so callers can catch the
+whole family with a single ``except BaseError`` when desired, while still being
+able to target a specific subclass.
+"""
+
 """
 +------------------------------+
 |            Global            |
@@ -24,7 +31,7 @@ class ModelError(BaseError):
 |         Ingestion            |
 +------------------------------+
 """
-class ExtractionError(Exception):
+class ExtractionError(BaseError):
     pass
 
 class TextExtractionError(ExtractionError):
@@ -42,9 +49,18 @@ class YTSubtitleExtractionError(ExtractionError):
 +------------------------------+
 """
 
-class EmbeddingError(Exception):
+class EmbeddingError(BaseError):
     pass
 
 
-class DatabaseError(Exception):
+class DatabaseError(BaseError):
+    pass
+
+"""
++------------------------------+
+|             Graph            |
++------------------------------+
+"""
+
+class GraphError(BaseError):
     pass

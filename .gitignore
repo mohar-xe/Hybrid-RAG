@@ -4,11 +4,12 @@
 .env.*.local
 .venv
 
-# Data folder (personal)
+# Personal folders
 data/
 tests/
 docs/
 logs/
+model/
 
 # Dependencies
 node_modules/

@@ -26,16 +26,16 @@ CREATE_INDEX_TSVECTOR = """CREATE INDEX IF NOT EXISTS idx_chunks_tsv ON chunks U
 
 def init_db():
     try:
-        with psycopg.connect(f"host={settings.database.host} port={settings.database.port} dbname={settings.database.db_name} user={settings.database.user} password={settings.database.password.get_secret_value()}") as conn:
+        with psycopg.connect(settings.database.conninfo) as conn:
             with conn.cursor() as cur: 
                 cur.execute(ENABLE_EXTENSION)
                 LOGGER.info("PGvector extension enabled.")
                 cur.execute(SQL_SCHEMA)
                 LOGGER.info("Schema skeleton initialized.")
                 cur.execute(CREATE_INDEX_EMBEDDING)
-                LOGGER.info("HNSW Index at embeddings.")
+                LOGGER.info("HNSW index on embeddings created.")
                 cur.execute(CREATE_INDEX_TSVECTOR)
-                LOGGER.info("GIN Index at keywordss.")
+                LOGGER.info("GIN index on tsvector created.")
 
             conn.commit()
     except Exception as e:
