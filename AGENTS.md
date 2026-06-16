@@ -14,25 +14,43 @@ FastAPI app as "planned" even though they are implemented. **Treat `src/` as the
 truth for what exists**, not the README. Do not assume a planned feature exists — verify in
 `src/` first.
 
-- **Implemented:** ingestion (PDF/YouTube/audio extraction → normalize → hierarchical chunk →
-  keyphrase → embed), pgvector storage + schema init, config/logging/exception infrastructure,
-  Ollama embeddings, LLM entity/triplet extraction (local + remote backends), Kùzu graph store,
-  near-duplicate node merge, hybrid retrieval (vector + BM25), Kùzu graph-context lookup,
-  heuristic query router, context assembly + citations, OpenAI-compatible generation, and a
-  FastAPI app (`/ingest` async + status, `/query`, `/health`).
-- **Planned / scaffolded (config may exist but logic is not wired yet):** cross-encoder
-  reranking (`RerankerSettings` + the router's `use_reranker` flag exist, but no reranker is
-  actually invoked), NLI self-verification (`VerifierSettings` exists; `/query` returns
-  `faithfulness: None`), retrieval quality scoring, HyDE, RAPTOR summaries, graph community
-  summaries, streaming `/query` responses (the `stream` flag is accepted but ignored), real-time
-  graph visualization, and the evaluation suite.
+- **Implemented:** ingestion (PDF/YouTube/audio extraction → normalize → **recursive
+  token-approx chunking** → keyphrase → embed), pgvector storage + schema init,
+  config/logging/exception infrastructure, Ollama embeddings, LLM entity/triplet extraction
+  (local + remote backends), Kùzu graph store, near-duplicate node merge, **coarse→fine
+  cluster-routed dense retrieval**, K-Means/medoid clustering via an explicit `reindex` command,
+  **cross-encoder reranking**, Kùzu graph-context lookup, heuristic query router, context
+  assembly + citations, OpenAI-compatible generation, and a FastAPI app (`/ingest` async +
+  status, `/query`, `/health`).
+- **Planned / scaffolded (config may exist but logic is not wired yet):** NLI self-verification
+  (`VerifierSettings` exists; `/query` returns `faithfulness: None`), retrieval quality scoring,
+  HyDE, RAPTOR summaries, graph community summaries, streaming `/query` responses (the `stream`
+  flag is accepted but ignored), real-time graph visualization, and the evaluation suite.
+- **Removed (do not reintroduce without discussion):** the old semantic/hierarchical chunker
+  (paragraph-embed → adjacency-cluster → spaCy entity-aware split) and flat vector/BM25
+  retrieval — both replaced by the staged pipeline below.
 
 ## Setup
+
+Frictionless path for a fresh clone:
+
+```bash
+./setup.sh            # uv sync + .env + Ollama running + pull nomic-embed-text
+./setup.sh --local    # also download the fine-tuned GGUF from HF and build hgr-triplet:q4
+```
+
+Or manually:
 
 ```bash
 uv sync
 cp .env.example .env   # then fill in REQUIRED values
 ```
+
+`setup.sh --local` downloads `qwen3-0.6b.F16.gguf` from the HF repo
+`mohar07/qwen3-0.6b-kg-triplets` into `model/` and runs `ollama create hgr-triplet:q4 -f
+model/Modfile`. Set `HF_TOKEN` in `.env` for faster/authenticated downloads (optional; the repo
+is public, and the app itself ignores `HF_TOKEN` — only `setup.sh` reads it). The GGUF is **not**
+committed to the repo; it must be pulled.
 
 External services this project talks to (must be running for end-to-end use):
 - **PostgreSQL with the `pgvector` extension** (chunk storage + HNSW/GIN indexes).
@@ -52,14 +70,32 @@ That means code runs with **`src/` as the import root**. Run the CLI from inside
 ```bash
 cd src
 uv run python pipeline.py ingest <path> --type pdf|youtube|audio [--extractor local|deepseek]
-uv run python pipeline.py ask "<question>" --top-k 5 --verbose
+uv run python pipeline.py reindex                # cluster chunks + mark medoids (run after ingest)
+uv run python pipeline.py ask "<question>" --verbose
 uv run python pipeline.py merge-graph            # dry run: lists candidates
 uv run python pipeline.py merge-graph --apply    # actually merges
 uv run python pipeline.py merge-graph --threshold 0.95   # override similarity cutoff
 ```
 
+Typical end-to-end order: **`ingest` → `reindex` → `ask`** (and `merge-graph --apply` any time
+after ingest to deduplicate graph entities). `reindex` is an explicit indexing step like
+`merge-graph`: it (re)computes `cluster_id`/`is_medoid` over all stored chunks. Until it runs,
+retrieval still works — it falls back to flat global ANN (see "Retrieval pipeline").
+
+`ingest` has **two independent phases**, separately toggleable:
+- **store** (`--store`/`--no-store`): extract → chunk → embed → pgvector. This is the slow part
+  (CPU embedding).
+- **graph** (`--graph`/`--no-graph`): triplet extraction → Kùzu.
+
+Because embedding is expensive, a transient extraction failure (e.g. a bad/empty DeepSeek
+response) should **not** force a re-embed. Re-run just the graph phase against already-stored
+chunks: `ingest <path> --no-store --graph` (it loads chunks via
+`pgvector.get_chunks_by_source`). The graph loop is also **per-chunk resilient** — one failed
+extraction is logged and skipped, not fatal, and `_parse_json` treats an empty response as zero
+triplets.
+
 - The **root `main.py` is a placeholder stub** — the real entry point is `src/pipeline.py`
-  (a Typer app with `ingest`, `ask`, `merge-graph` commands).
+  (a Typer app with `ingest`, `ask`, `reindex`, `merge-graph` commands).
 - `merge-graph` is destructive only with `--apply`; default is a dry run. Preserve that
   dry-run-by-default behavior. `--threshold/-s` overrides
   `GRAPH__MERGE_SIMILARITY_THRESHOLD` (default `0.90`) for a single run.
@@ -74,31 +110,68 @@ uv run uvicorn api.app:app --reload      # http://localhost:8000  (docs at /docs
 ## Architecture / layout (`src/`)
 
 ```
-config/      Pydantic settings (settings.py) + DB schema init (init_db.py)
+config/      Pydantic settings (settings.py) + DB schema init/migrations (init_db.py)
 constants/   logger.py (rotating file + console) + exceptions.py (typed hierarchy)
-ingestion/   extractor, normalize, chunker, chunk_schema  [implemented]
+ingestion/   extractor, normalize, chunker (recursive splitter), chunk_schema  [implemented]
 embeddings/  embedder.py — nomic-embed-text via Ollama, 256-dim (Matryoshka)
 graph/       entity_extraction.py, schema.py, merge.py    [implemented]
-retrieval/   pgvector.py (vector + BM25 hybrid), kuzu_store.py [implemented]
+retrieval/   pgvector.py (cluster-routed dense search), cluster.py (K-Means/medoids),
+             reranker.py (cross-encoder), kuzu_store.py   [implemented]
 context/     builder.py — context assembly + citations    [implemented]
 llm/         generator.py — OpenAI-compatible generation   [implemented]
 reasoning/   router.py — heuristic query routing [implemented]; verifier [planned]
 api/         app.py — FastAPI surface (/ingest, /query, /health) [implemented core]
-pipeline.py  Typer CLI (real entry point)
+pipeline.py  Typer CLI (ingest, ask, reindex, merge-graph) — real entry point
 ```
 
-## Retrieval routing
+## Chunking & embedding (ingestion)
 
-`reasoning/router.py` is a **heuristic (no-LLM) router**: `classify_query` labels a query
-`simple | moderate | complex` from word count, leading question phrase, capitalized-token
-("entity") count, and comparison/multi-hop keywords. `route_retrieval` maps that label to a
-strategy dict (`use_vector`, `use_bm25`, `use_graph`, `use_reranker`, `top_k`). Both the CLI
-`ask` and the API `/query` consume this dict:
-- `use_bm25` → `retrieval.pgvector.hybrid_search`, else `vector_search` on a fresh embedding.
-- `use_graph` → pull capitalized tokens as candidate entities and fetch
-  `retrieval.kuzu_store.get_entity_context`.
-- `use_reranker` is **set but not yet acted on** — no reranker runs. If you wire one up, read
-  `RerankerSettings` and gate it on this flag rather than adding a new toggle.
+`ingestion/chunker.py` is a **RecursiveCharacterTextSplitter** (`chunk_text`): it splits on a
+separator priority list `["\n\n", "\n", ". ", " "]`, descending to the next separator for any
+piece still over budget and hard-splitting on characters as a last resort (`_atomic_splits`),
+then greedily re-packs pieces with a sliding-window overlap (`_merge_splits`). Sizes are
+**character-approximated tokens** (`CHARS_PER_TOKEN = 4`): `CHUNK_CHARS = 1200` (~300 tokens),
+`OVERLAP_CHARS = 200` (~50 tokens). This bounds every chunk *before* embedding, which is the
+whole point — the previous paragraph-embed-then-cluster design could feed 25k-token blobs to
+Ollama and 400. There is **no tokenizer dependency** and **no spaCy/clustering** in chunking
+anymore.
+
+`embeddings/embedder.py` (`nomic-embed-text`, 2048-token context):
+- Each input is capped to `MAX_INPUT_CHARS = 8000` client-side and `truncate=True` is passed to
+  Ollama — a defence-in-depth against over-long inputs (a single over-long input, or a *batch*
+  of them, otherwise 400s).
+- `BATCH_SIZE = 16`. Ollama CPU embedding shows **no batch speedup** (~constant s/input) and a
+  very large batch becomes one long request that monopolizes the runner and looks hung. Don't
+  raise this without measuring.
+- Output is truncated to 256 dims (Matryoshka) and the chunker L2-normalizes stored vectors.
+- `normalize.remove_control_chars` (and a defensive strip in `chunk_text`) removes NUL/control
+  bytes — PostgreSQL `text` rejects NUL, which PDF extraction frequently injects.
+
+## Retrieval pipeline (coarse→fine + rerank)
+
+Flat vector/BM25 retrieval is **gone**. `ask`/`/query` now run:
+
+1. Embed the query (`embedder`).
+2. `retrieval.pgvector.cluster_routed_search(emb)`:
+   - **Coarse**: ANN over medoids only (`WHERE is_medoid`) → top 10.
+   - **Gate**: if best medoid similarity < `0.35` *or there are no medoids yet* (i.e. `reindex`
+     hasn't run), fall back to flat global ANN.
+   - **Select** the top 5 distinct clusters by medoid similarity.
+   - **Fine**: cluster-filtered ANN (`cluster_id = ANY(top5)`) → top 15.
+   - **Global fallback**: a parallel unfiltered ANN → top 5, merged + de-duplicated with the
+     fine results (keep higher score). Yields up to ~20 candidates.
+3. `retrieval.reranker.rerank(query, candidates)` (cross-encoder
+   `cross-encoder/ms-marco-MiniLM-L-6-v2`, lazy-loaded) → final top-k (`RERANKER__TOP_K`, default
+   5). **Rerank always runs now** (Stage 4 is unconditional), not gated on the router.
+4. Optional Kùzu graph facts (gated on the router's `use_graph`), then context build + generate.
+
+Clustering (`retrieval/cluster.py`, invoked by `reindex`): spherical K-Means over the
+L2-normalized 256-d chunk embeddings with `K = max(3, round(sqrt(n)))`; the **medoid** of each
+cluster is the actual chunk with max cosine to the centroid. `cluster_id`/`is_medoid` are
+persisted on the `chunks` table (`init_db` adds them via idempotent `ALTER ... ADD COLUMN IF NOT
+EXISTS`, plus a partial medoid index and a `cluster_id` index). `reasoning/router.py` still
+classifies complexity and provides `use_graph`, but its `use_bm25`/`top_k`/`use_reranker` fields
+no longer drive retrieval.
 
 ## Graph store (Kùzu)
 
@@ -136,10 +209,22 @@ KG triplet extraction has **two interchangeable backends**, in
 `EXTRACTION__BACKEND` (default `deepseek`). Select per run with the CLI `--extractor/-e`
 (`local|deepseek`) or the `POST /ingest?extractor=` query param. `extract_entities_llm`
 stays as a backward-compatible alias for the local path. Both backends share one system
-prompt (`_build_system_prompt`), JSON parsing (`_parse_json`), and an **idempotent schema
-check** (`validate_triplets` — validates raw dicts against the `Triplet` schema, drops invalid
-ones, and passes through items that are already validated `Triplet` instances). Keep that
-shared path intact, and register any third backend in `_BACKENDS`.
+prompt (`_build_system_prompt`), JSON parsing (`_parse_json` — returns `[]` for an empty
+response instead of raising), and an **idempotent schema check** (`validate_triplets` —
+validates raw dicts against the `Triplet` schema, drops invalid ones, and passes through items
+that are already validated `Triplet` instances). Keep that shared path intact, and register any
+third backend in `_BACKENDS`.
+
+Concurrency & thinking:
+- `extract_entities_batch(texts, backend, max_workers)` runs extraction **concurrently**
+  (`ThreadPoolExecutor`, I/O-bound calls), order-preserved, returning `None` for any text that
+  errored (the caller counts/skips it). Concurrency defaults to `NER__CONCURRENCY` /
+  `EXTRACTION__CONCURRENCY` (both 10). The ingest graph phase calls this in batches and writes
+  results to Kùzu **serially** (a Kùzu connection is not thread-safe).
+- `NER__DISABLE_THINKING` (default `true`) sends `{"thinking": {"type": "disabled"}}` to the
+  DeepSeek API. DeepSeek's hybrid models default to reasoning, which burns the token budget and
+  often leaves `content` empty — with thinking on, extraction yielded ~2 triplets across 145
+  chunks; with it off, ~1000. Leave this on unless a backend rejects the field.
 
 ## Conventions (follow these)
 

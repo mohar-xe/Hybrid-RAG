@@ -18,12 +18,38 @@ Rules:
 - Do not invent information not present in the context.
 - Be concise but thorough."""
 
+# Closed-book: no retrieval context is supplied. Used by the evaluation's
+# `direct` baseline to measure the model's parametric knowledge alone.
+CLOSED_BOOK_SYSTEM_PROMPT = """You are a knowledgeable assistant. Answer the question directly from your own knowledge.
 
-def generate(query: str, context: str, stream: bool = False) -> str | Generator[str, None, None]:
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {query}"},
-    ]
+Rules:
+- Give the most likely answer even if you are uncertain.
+- Be concise: answer in as few words as the question allows.
+- Do not ask for clarification and do not mention missing context."""
+
+
+def generate(
+    query: str,
+    context: str = "",
+    *,
+    stream: bool = False,
+    closed_book: bool = False,
+) -> str | Generator[str, None, None]:
+    """Generate an answer from an OpenAI-compatible endpoint.
+
+    When ``closed_book`` is True the retrieval ``context`` is ignored and a
+    closed-book system prompt is used (the evaluation's ``direct`` baseline).
+    """
+    if closed_book:
+        messages = [
+            {"role": "system", "content": CLOSED_BOOK_SYSTEM_PROMPT},
+            {"role": "user", "content": query},
+        ]
+    else:
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {query}"},
+        ]
 
     if stream:
         return _stream_generate(messages)

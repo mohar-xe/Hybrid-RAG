@@ -1,36 +1,64 @@
-"""Semantic chunking with pooled embeddings and a re-embedding pass for splits.
+"""Recursive text chunking (Stage 1).
 
-Paragraph embeddings are computed once in :func:`chunk_text` and feed both
-clustering and the pooled vectors for whole-cluster chunks (length-weighted mean
-pooling + L2 renormalization). Oversized clusters are subdivided into
-sentence-level chunks whose pooled vectors are only a loose approximation of the
-re-sliced text, so those chunks get a second, direct embedding pass before
-storage. Chunks are stored and searched under cosine distance
-(``vector_cosine_ops``), so only direction matters and every stored vector is
-L2-normalized to stay on the same unit sphere as freshly embedded queries.
+Splits normalized text into bounded ~300-token chunks *before* embedding, so no
+single input can exceed the embedding model's context window (the previous
+paragraph-embed-then-cluster approach could feed 25k-token blobs to Ollama and
+400). Token counts are approximated from characters (~4 chars/token, see
+``CHARS_PER_TOKEN``) — no real tokenizer dependency.
+
+Algorithm (RecursiveCharacterTextSplitter style):
+1. Recursively split on the highest-priority separator that appears
+   (``["\\n\\n", "\\n", ". ", " "]``), descending to the next separator for any
+   piece still larger than the target, and hard-splitting on characters as a
+   last resort. This yields atomic pieces each <= the char budget.
+2. Greedily merge atomic pieces back up to ``CHUNK_CHARS``, carrying an
+   ``OVERLAP_CHARS`` tail of trailing pieces into the next chunk.
+3. Embed every chunk in one batched pass (sizes are now bounded, so this is
+   safe) and L2-normalize for cosine search.
+
+Chunks are stored/searched under cosine distance (``vector_cosine_ops``).
 """
 
 from dataclasses import dataclass
 from typing import Literal
+import re
 import uuid
 
 import numpy as np
 
 from constants.logger import setup_logger
-from ingestion.normalize import split_into_paragraphs
-from constants.exceptions import ModelError, ConfigurationError
+from constants.exceptions import ConfigurationError
+from ingestion.normalize import split_into_paragraphs  # noqa: F401  (kept for callers/tests)
 from embeddings.embedder import embedder
 from ingestion.chunk_schema import Chunk
 
 LOGGER = setup_logger(__name__)
 
+# Char-based token approximation: ~4 chars per token for English text.
+CHARS_PER_TOKEN = 4
+CHUNK_TOKENS = 300
+OVERLAP_TOKENS = 50
+CHUNK_CHARS = CHUNK_TOKENS * CHARS_PER_TOKEN      # ~1200 chars
+OVERLAP_CHARS = OVERLAP_TOKENS * CHARS_PER_TOKEN  # ~200 chars
+
+# Separator priority: paragraph -> line -> sentence -> word -> character.
+SEPARATORS = ["\n\n", "\n", ". ", " "]
+
+# C0/C1 control chars (incl. NUL) except tab/newline — PostgreSQL text rejects NUL.
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
 
 @dataclass
 class ChunkDraft:
-    """A finalized chunk text paired with its reused (non-recomputed) embedding."""
+    """A finalized chunk text paired with its embedding."""
 
     text: str
     embedding: list[float]
+
+
+def approx_tokens(text: str) -> int:
+    """Approximate token count from character length (~4 chars/token)."""
+    return max(1, len(text) // CHARS_PER_TOKEN)
 
 
 def _l2_normalize(vectors: np.ndarray) -> np.ndarray:
@@ -40,230 +68,105 @@ def _l2_normalize(vectors: np.ndarray) -> np.ndarray:
     return vectors / norms
 
 
-def _pool(vectors: np.ndarray, weights: np.ndarray | None = None) -> list[float]:
-    """Length-weighted mean pool of paragraph vectors, then L2 renormalize.
+def _atomic_splits(text: str, separators: list[str], max_chars: int) -> list[str]:
+    """Split ``text`` into pieces each <= ``max_chars`` (best effort).
 
-    Approximates the embedding of the concatenated text by reusing the
-    component paragraph embeddings instead of calling the model again. Cosine
-    search ignores magnitude, so renormalizing keeps the result on the same
-    unit sphere as query embeddings.
+    Tries the highest-priority separator that occurs in ``text``; pieces still
+    too large are recursively split on the next separator, then hard-split on
+    characters. Empty pieces are dropped.
     """
-    if len(vectors) == 1:
-        pooled = vectors[0].astype(float)
-    elif weights is None:
-        pooled = vectors.mean(axis=0)
-    else:
-        w = weights.astype(float)
-        total = w.sum()
-        w = w / total if total > 0 else np.full(len(w), 1.0 / len(w))
-        pooled = (vectors * w[:, None]).sum(axis=0)
-
-    norm = np.linalg.norm(pooled)
-    if norm > 0:
-        pooled = pooled / norm
-    return pooled.tolist()
-
-
-def clustering(normalized: np.ndarray, threshold: float = 0.7) -> list[list[int]]:
-    """Group consecutive paragraphs into topic segments by cosine similarity.
-    Expects L2-normalized embeddings (the caller normalizes once upstream), so
-    the
-    dot product below is exactly cosine similarity. Returns clusters as lists
-    of
-    paragraph indices, letting the caller reuse the paragraph texts and
-    vectors.
-    """
-
-    n = len(normalized)
-    if n == 0:
+    text = text.strip()
+    if not text:
         return []
-    if n == 1:
-        return [[0]]
+    if len(text) <= max_chars:
+        return [text]
 
-    similarities = np.sum(normalized[:-1] * normalized[1:], axis=1)
-
-    clusters: list[list[int]] = []
-    current = [0]
-    for idx, sim in enumerate(similarities):
-        if sim > threshold:
-            current.append(idx + 1)
-        else:
-            clusters.append(current)
-            current = [idx + 1]
-    clusters.append(current)
-
-    LOGGER.info(f"Created {len(clusters)} clusters from {n} paragraphs.")
-    return clusters
-
-
-def _emit_subchunk(
-    sentences: list[str],
-    sent_para: list[int],
-    embeddings: np.ndarray,
-    start: int,
-    end: int,
-) -> ChunkDraft:
-    """Build a sub-chunk from ``sentences[start:end]``, pooling the embeddings of
-    the paragraphs those sentences came from (weighted by words contributed)."""
-    text = " ".join(sentences[start:end])
-    covered = sorted({sent_para[i] for i in range(start, end)})
-    local = {p: k for k, p in enumerate(covered)}
-    weights = np.zeros(len(covered), dtype=float)
-    for i in range(start, end):
-        weights[local[sent_para[i]]] += len(sentences[i].split())
-    return ChunkDraft(text=text, embedding=_pool(embeddings[covered], weights))
-
-
-def split_large_chunks(
-    paragraphs: list[str],
-    embeddings: np.ndarray,
-    chunk_length: int = 300,
-    overlap: int = 2,
-) -> list[ChunkDraft]:
-    """Subdivide one oversized cluster into chunks.
-
-    Cut points prefer the weakest *paragraph* similarity boundary inside a short
-    look-ahead window (reusing the clustering scores), and fall back to the
-    entity-discontinuity heuristic when no paragraph boundary is in range. Each
-    emitted chunk's embedding is a pooled approximation of the paragraph vectors
-    it covers; :func:`chunk_text` re-embeds these chunk texts directly in a
-    second pass before storage.
-    """
-    try:
-        import spacy
-        nlp = spacy.load("en_core_web_sm")
-    except Exception as e:
-        LOGGER.error("Unable to fetch model: en_core_web_sm")
-        raise ModelError(f"Unable to fetch model: {e}")
-
-    # Sentences + per-sentence entities, remembering the source paragraph so
-    # each sub-chunk can map back to the correct embeddings.
-    sentences: list[str] = []
-    sent_entities: list[set[str]] = []
-    sent_para: list[int] = []
-    for p_idx, doc in enumerate(nlp.pipe(paragraphs)):
-        for sent in doc.sents:
-            s = sent.text.strip()
-            if not s:
-                continue
-            sentences.append(s)
-            sent_entities.append({ent.text.lower() for ent in sent.ents})
-            sent_para.append(p_idx)
-
-    if not sentences:
-        return []
-
-    # Consecutive-paragraph cosine similarities. Every value is above the
-    # clustering threshold by definition, but the relatively weakest links are
-    # the best places to cut an oversized cluster.
-    normalized = _l2_normalize(embeddings)
-    if len(normalized) > 1:
-        para_sim = np.sum(normalized[:-1] * normalized[1:], axis=1)
-    else:
-        para_sim = np.array([])
-
-    drafts: list[ChunkDraft] = []
-    start = 0
-    while start < len(sentences):
-        word_count = 0
-        end = start
-        while end < len(sentences) and word_count < chunk_length:
-            word_count += len(sentences[end].split())
-            end += 1
-
-        if end >= len(sentences):
-            drafts.append(_emit_subchunk(sentences, sent_para, embeddings, start, len(sentences)))
+    # Pick the first separator present in the text.
+    sep = None
+    rest: list[str] = []
+    for i, s in enumerate(separators):
+        if s and s in text:
+            sep = s
+            rest = separators[i + 1:]
             break
 
-        window = range(end, min(end + 5, len(sentences)))
-        cut = end
-        effective_overlap = overlap
+    if sep is None:
+        # No separator left: hard char split.
+        return [text[i:i + max_chars] for i in range(0, len(text), max_chars)]
 
-        # Primary signal: cut at the weakest paragraph boundary in the window.
-        weakest_sim = None
-        weakest_cut = None
-        for i in window:
-            if sent_para[i] != sent_para[i - 1]:
-                b = sent_para[i - 1]
-                sim = para_sim[b] if 0 <= b < len(para_sim) else 1.0
-                if weakest_sim is None or sim < weakest_sim:
-                    weakest_sim = sim
-                    weakest_cut = i
-
-        if weakest_cut is not None:
-            cut = weakest_cut
+    pieces: list[str] = []
+    for part in text.split(sep):
+        part = part.strip()
+        if not part:
+            continue
+        if len(part) <= max_chars:
+            pieces.append(part)
         else:
-            # Fallback: original entity-continuity heuristic.
-            window_entities: set[str] = set()
-            for i in range(start, end):
-                window_entities |= sent_entities[i]
-            if not window_entities:
-                effective_overlap = overlap + 2
-            else:
-                for i in window:
-                    if not sent_entities[i] & window_entities:
-                        cut = i
-                        break
-
-        drafts.append(_emit_subchunk(sentences, sent_para, embeddings, start, cut))
-        start = max(cut - effective_overlap, start + 1)
-
-    LOGGER.info(f"Split oversized cluster into {len(drafts)} chunks.")
-    return drafts
+            pieces.extend(_atomic_splits(part, rest, max_chars))
+    return pieces
 
 
-def chunk_text(text: str, threshold: float = 0.7, chunk_length: int = 300) -> list[ChunkDraft]:
-    """Cluster paragraphs semantically and return finalized chunk drafts.
+def _merge_splits(splits: list[str], max_chars: int, overlap_chars: int) -> list[str]:
+    """Greedily pack atomic ``splits`` into chunks, with a bounded overlap tail.
 
-    Embeds paragraphs once; those vectors drive clustering and the pooled
-    embeddings of whole-cluster chunks. Oversized clusters are split into
-    sentence-level chunks (still pooled internally), and because that slicing
-    crosses paragraph boundaries, the split chunks are re-embedded directly in a
-    single batched second pass so their stored vectors reflect their actual text.
+    Sliding-window merge: accumulate pieces until the next would exceed
+    ``max_chars``, emit the chunk, then pop pieces off the front until the
+    retained tail is <= ``overlap_chars`` — that tail becomes the overlap prefix
+    of the next chunk. A chunk may exceed ``max_chars`` by at most the overlap
+    tail plus one piece (standard recursive-splitter behaviour); all atomic
+    pieces are already <= ``max_chars``.
     """
-    paragraphs = split_into_paragraphs(text)
-    if not paragraphs:
+    sep = " "  # atomic pieces are re-joined with a single space
+    sep_len = len(sep)
+    chunks: list[str] = []
+    current: list[str] = []
+    total = 0  # length of current incl. separators
+
+    for d in splits:
+        addition = len(d) + (sep_len if current else 0)
+        if current and total + addition > max_chars:
+            chunks.append(sep.join(current))
+            # Pop from the front until the retained tail fits the overlap budget
+            # (or until a single oversized piece is all that remains).
+            while current and (total > overlap_chars or total + addition > max_chars):
+                removed = len(current[0]) + (sep_len if len(current) > 1 else 0)
+                total -= removed
+                current = current[1:]
+        current.append(d)
+        total += len(d) + (sep_len if len(current) > 1 else 0)
+
+    if current:
+        chunks.append(sep.join(current))
+    return chunks
+
+
+def chunk_text(text: str, chunk_chars: int = CHUNK_CHARS, overlap_chars: int = OVERLAP_CHARS) -> list[ChunkDraft]:
+    """Recursively split ``text`` into bounded chunks and embed them.
+
+    Returns ``ChunkDraft``s (text + L2-normalized embedding). Every chunk is at
+    most ``chunk_chars`` (~300 tokens), so the batched embedding call can never
+    exceed the model context.
+    """
+    text = (text or "").strip()
+    if not text:
         return []
 
-    LOGGER.info("Embedding paragraphs once (reused for clustering + pooled chunk vectors).")
-    embeddings = np.array(embedder(paragraphs))
-    normalized = _l2_normalize(embeddings)
+    # Defensive: strip NUL/control bytes (PostgreSQL text rejects NUL). The PDF
+    # path already does this in clean_pdf_text; YouTube/audio sources don't.
+    text = _CONTROL_CHARS.sub("", text)
 
-    clusters = clustering(normalized, threshold)
+    atoms = _atomic_splits(text, SEPARATORS, chunk_chars)
+    chunk_strs = _merge_splits(atoms, chunk_chars, overlap_chars)
+    if not chunk_strs:
+        return []
 
-    drafts: list[ChunkDraft] = []
-    split_positions: list[int] = []  # indices into `drafts` produced by splitting
-    for cluster in clusters:
-        cluster_embeddings = embeddings[cluster]
-        cluster_paragraphs = [paragraphs[i] for i in cluster]
-        word_count = sum(len(p.split()) for p in cluster_paragraphs)
+    LOGGER.info(
+        f"Recursive split produced {len(chunk_strs)} chunks "
+        f"(~{CHUNK_TOKENS}tok target, ~{OVERLAP_TOKENS}tok overlap)."
+    )
 
-        if word_count > chunk_length:
-            split_drafts = split_large_chunks(cluster_paragraphs, cluster_embeddings, chunk_length)
-            split_positions.extend(range(len(drafts), len(drafts) + len(split_drafts)))
-            drafts.extend(split_drafts)
-        else:
-            weights = np.array([len(p.split()) for p in cluster_paragraphs], dtype=float)
-            drafts.append(
-                ChunkDraft(
-                    text=" ".join(cluster_paragraphs),
-                    embedding=_pool(cluster_embeddings, weights),
-                )
-            )
-
-    # Second embedding round: split chunks slice across paragraph/sentence
-    # boundaries, so their pooled vectors are the loosest approximation. Re-embed
-    # those chunk texts directly (one batched call) and replace the pooled
-    # placeholder; whole-cluster chunks keep their pooled embedding. Renormalize
-    # so every stored vector stays unit-length under cosine search.
-    if split_positions:
-        LOGGER.info(f"Re-embedding {len(split_positions)} split chunks (second pass).")
-        reembedded = _l2_normalize(np.array(embedder([drafts[i].text for i in split_positions])))
-        for pos, vector in zip(split_positions, reembedded):
-            drafts[pos].embedding = vector.tolist()
-
-    LOGGER.info(f"Final chunk count: {len(drafts)}")
-    return drafts
+    vectors = _l2_normalize(np.array(embedder(chunk_strs)))
+    return [ChunkDraft(text=t, embedding=v.tolist()) for t, v in zip(chunk_strs, vectors)]
 
 
 def extract_keyphrases(text: str) -> list[str]:
@@ -287,11 +190,11 @@ def extract_keyphrases(text: str) -> list[str]:
 
 
 def chunk_enrich(chunks: list[ChunkDraft], source: Literal["PDF", "Reel", "Youtube"], id: str) -> list[Chunk]:
-    """Promote drafts to stored Chunks, reusing each draft's pooled embedding."""
+    """Promote drafts to stored Chunks, reusing each draft's embedding."""
     finalized_chunks = []
     for idx, draft in enumerate(chunks):
         enriched = Chunk(
-            chunk_id=str(uuid.uuid1()),
+            chunk_id=str(uuid.uuid4()),
             text=draft.text,
             embeddings=draft.embedding,
             source_type=source,

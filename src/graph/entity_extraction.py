@@ -60,6 +60,11 @@ def _parse_json(content: str) -> list[dict]:
     if content.startswith("```"):
         content = content.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
 
+    if not content:
+        # Empty model response -> no triplets (not an error).
+        LOGGER.warning("Empty extraction response; no triplets parsed.")
+        return []
+
     data = json.loads(content)
     if not isinstance(data, list):
         data = [data]
@@ -134,19 +139,25 @@ def extract_entities_api(text: str) -> list[Triplet]:
             "(--extractor local / EXTRACTION__BACKEND=local)."
         )
 
+    payload = {
+        "model": ner.model,
+        "messages": [
+            {"role": "system", "content": _build_system_prompt(ner.min_triplets, ner.max_triplets)},
+            {"role": "user", "content": f"Passage:\n{text}"},
+        ],
+        "temperature": ner.temperature,
+        "max_tokens": 1024,
+        "stream": False,
+    }
+    if ner.disable_thinking:
+        # DeepSeek hybrid models default to reasoning; disabling it keeps the
+        # token budget for the actual JSON answer and cuts latency.
+        payload["thinking"] = {"type": "disabled"}
+
     response = httpx.post(
         f"{ner.base_url.rstrip('/')}/chat/completions",
         headers={"Authorization": f"Bearer {api_key}"},
-        json={
-            "model": ner.model,
-            "messages": [
-                {"role": "system", "content": _build_system_prompt(ner.min_triplets, ner.max_triplets)},
-                {"role": "user", "content": f"Passage:\n{text}"},
-            ],
-            "temperature": ner.temperature,
-            "max_tokens": 1024,
-            "stream": False,
-        },
+        json=payload,
         timeout=ner.timeout,
     )
     response.raise_for_status()
@@ -184,6 +195,59 @@ def extract_entities(text: str, backend: str | None = None) -> list[Triplet]:
             f"Unknown extraction backend: {backend!r}. Choose 'local' or 'deepseek'."
         )
     return fn(text)
+
+
+def _resolve_concurrency(backend_name: str) -> int:
+    """Per-backend default concurrency (NER__CONCURRENCY / EXTRACTION__CONCURRENCY)."""
+    if backend_name in ("deepseek", "api"):
+        return ner.concurrency
+    return extraction.concurrency
+
+
+def extract_entities_batch(
+    texts: list[str],
+    backend: str | None = None,
+    max_workers: int | None = None,
+) -> list[list[Triplet] | None]:
+    """Extract triplets for many texts concurrently (the calls are I/O-bound).
+
+    Returns one entry per input text, in the **same order**:
+    * ``list[Triplet]`` (possibly empty) on success,
+    * ``None`` if that text's extraction raised (transient API/network error or
+      bad response) — the caller can count/skip these without aborting the run.
+
+    Concurrency defaults to the backend's configured value
+    (``NER__CONCURRENCY`` for ``deepseek``, ``EXTRACTION__CONCURRENCY`` for
+    ``local``). Kùzu writes are NOT done here — do them serially in the caller,
+    since a Kùzu connection is not thread-safe.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    if not texts:
+        return []
+
+    name = (backend or extraction.backend).lower()
+    if name not in _BACKENDS:
+        raise ConfigurationError(
+            f"Unknown extraction backend: {backend!r}. Choose 'local' or 'deepseek'."
+        )
+    workers = max_workers or _resolve_concurrency(name)
+    workers = max(1, min(workers, len(texts)))
+
+    results: list[list[Triplet] | None] = [None] * len(texts)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        future_to_idx = {
+            pool.submit(extract_entities, text, backend): i
+            for i, text in enumerate(texts)
+        }
+        for future in as_completed(future_to_idx):
+            i = future_to_idx[future]
+            try:
+                results[i] = future.result()
+            except Exception as exc:
+                LOGGER.warning(f"Extraction failed for item {i}: {exc}")
+                results[i] = None
+    return results
 
 
 # Backward-compatible alias: older callers / notebooks import this name.

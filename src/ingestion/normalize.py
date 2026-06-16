@@ -1,4 +1,4 @@
-# src/utils/text_cleaning.py
+# src/ingestion/normalize.py
 
 import re
 import unicodedata
@@ -30,6 +30,16 @@ def remove_zero_width_chars(text: str) -> str:
     Remove invisible unicode characters often found in PDFs.
     """
     return re.sub(r"[\u200B-\u200D\uFEFF]", "", text)
+
+
+def remove_control_chars(text: str) -> str:
+    """
+    Strip C0/C1 control characters (incl. NUL 0x00) except tab and newline.
+
+    PDF extraction frequently injects NUL and other control bytes; PostgreSQL
+    ``text`` columns reject NUL, so this must run before storage.
+    """
+    return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", text)
 
 
 # ---------------------------------------------------------
@@ -240,6 +250,7 @@ def clean_pdf_text(
     text = normalize_unicode(text)
     text = normalize_newlines(text)
     text = remove_zero_width_chars(text)
+    text = remove_control_chars(text)
 
     text = normalize_quotes(text)
     text = normalize_bullets(text)

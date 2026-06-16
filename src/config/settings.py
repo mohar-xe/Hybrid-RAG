@@ -7,6 +7,9 @@ from pydantic import SecretStr, Field
 # Resolve the project-root .env regardless of the current working directory
 # (e.g. when a module is imported from a notebook under src/graph/).
 _ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
+# Project root (the directory holding .env). Used for resolving allow-listed
+# paths (e.g. the /ingest directory) independent of the current working dir.
+_ROOT = _ENV_FILE.parent
 
 
 class DatabaseSettings(BaseSettings):
@@ -18,11 +21,22 @@ class DatabaseSettings(BaseSettings):
 
     @property
     def conninfo(self) -> str:
-        """libpq connection string used by psycopg across the project."""
-        return (
-            f"host={self.host} port={self.port} dbname={self.db_name} "
-            f"user={self.user} password={self.password.get_secret_value()}"
-        )
+        """libpq connection string used by psycopg across the project.
+
+        The ``password`` key is omitted when empty so passwordless local setups
+        (unix-socket peer/trust auth) work; including ``password=`` empty would
+        otherwise trip md5/scram auth with "no password supplied".
+        """
+        parts = [
+            f"host={self.host}",
+            f"port={self.port}",
+            f"dbname={self.db_name}",
+            f"user={self.user}",
+        ]
+        secret = self.password.get_secret_value()
+        if secret:
+            parts.append(f"password={secret}")
+        return " ".join(parts)
 
 class GraphSettings(BaseSettings):
     db_path: Path = Path("data/kuzu_db")
@@ -67,6 +81,9 @@ class ExtractionSettings(BaseSettings):
     temperature: float = 0.0
     timeout: float = 120.0
     num_ctx: int | None = None
+    # Concurrent extraction requests (used by extract_entities_batch). Ollama
+    # may serialize on CPU, so gains here are smaller than for the remote API.
+    concurrency: Annotated[int, Field(ge=1, le=64)] = 10
     min_triplets: Annotated[int, Field(ge=1)] = 1
     max_triplets: Annotated[int, Field(ge=1)] = 8
 
@@ -88,6 +105,14 @@ class NERSettings(BaseSettings):
     api_key: SecretStr = SecretStr("")
     temperature: float = 0.0
     timeout: float = 120.0
+    # Concurrent extraction requests against the remote API
+    # (used by extract_entities_batch). The API parallelizes well.
+    concurrency: Annotated[int, Field(ge=1, le=64)] = 10
+    # Disable the model's reasoning/"thinking" mode. DeepSeek's hybrid models
+    # default to thinking, which burns the token budget on reasoning and can
+    # leave `content` empty — bad for structured extraction. Sends
+    # {"thinking": {"type": "disabled"}} on the request.
+    disable_thinking: bool = True
     min_triplets: Annotated[int, Field(ge=1)] = 1
     max_triplets: Annotated[int, Field(ge=1)] = 8
 
@@ -97,9 +122,40 @@ class RerankerSettings(BaseSettings):
     top_k: int = 5
 
 
+class ContextSettings(BaseSettings):
+    """Context-assembly budget for the prompt sent to the generator.
+
+    ``max_tokens`` caps the approximate token count of retrieved chunks packed
+    into the context window (rough word-count * ``token_ratio`` estimate; the
+    real tokenizer lives server-side). Keep headroom below the generator's
+    context length for the system prompt, the question, and the answer.
+    """
+    max_tokens: Annotated[int, Field(ge=256)] = 3000
+    # Words -> approx tokens multiplier used to estimate chunk size without a
+    # tokenizer dependency. ~1.3 is a reasonable English heuristic.
+    token_ratio: Annotated[float, Field(gt=0.0)] = 1.3
+
+
 class VerifierSettings(BaseSettings):
+    # Off by default: the NLI cross-encoder is heavy and adds latency to every
+    # /query. Enable explicitly (VERIFIER__ENABLED=true) to populate the
+    # `faithfulness` score on responses.
+    enabled: bool = False
     model: str = "cross-encoder/nli-deberta-v3-base"
     threshold: float = 0.6
+
+
+class APISettings(BaseSettings):
+    """FastAPI surface configuration (``API__*``).
+
+    ``api_key`` gates every endpoint when set; leave it empty ONLY for trusted
+    local use — the app logs a loud warning at startup when it is unset.
+    ``ingest_dir`` is the allow-listed root for ``/ingest`` file paths: requests
+    referencing files resolving outside it are rejected, preventing the endpoint
+    from reading arbitrary server files.
+    """
+    api_key: SecretStr = SecretStr("")
+    ingest_dir: Path = _ROOT / "data"
 
 
 class Settings(BaseSettings):
@@ -116,7 +172,9 @@ class Settings(BaseSettings):
     extraction: ExtractionSettings = ExtractionSettings()
     ner: NERSettings = NERSettings()
     reranker: RerankerSettings = RerankerSettings()
+    context: ContextSettings = ContextSettings()
     verifier: VerifierSettings = VerifierSettings()
+    api: APISettings = APISettings()
 
 def get_settings() -> Settings:
     return Settings()

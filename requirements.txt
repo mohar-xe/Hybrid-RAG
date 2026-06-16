@@ -1,6 +1,14 @@
-pymupdf
-youtube-transcript-api
-pywhispercpp
-yt-dlp
-logging
-ollama
+# Dependencies are declared in pyproject.toml and pinned in uv.lock — that is the
+# single source of truth. This file exists only for tooling that expects a
+# requirements.txt and simply re-exports the project's runtime dependencies.
+#
+#   uv sync                      # install the locked runtime dependencies
+#   uv sync --extra eval         # also install the evaluation harness (datasets)
+#
+# To regenerate a flat list from the lock (optional):
+#   uv export --no-hashes --no-dev -o requirements.txt
+#
+# Install this project (and its deps) directly with:
+#   pip install -e .             # runtime only
+#   pip install -e '.[eval]'     # runtime + evaluation harness
+-e .

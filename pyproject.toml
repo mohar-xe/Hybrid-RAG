@@ -6,12 +6,10 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "ipykernel>=7.2.0",
-    "logging>=0.4.9.6",
     "ollama>=0.6.2",
     "pydantic-settings>=2.14.1",
     "pymupdf>=1.27.2.3",
     "pywhispercpp>=1.4.1",
-    "spacy>=3.8.14",
     "youtube-transcript-api>=1.2.4",
     "yt-dlp>=2026.3.17",
     "psycopg[binary]>=3.2.0",
@@ -28,6 +26,23 @@ dependencies = [
     "hnswlib==0.8.0",
 ]
 
+[project.optional-dependencies]
+# Offline evaluation harness (see /evaluation). Kept out of the core install
+# because it is only needed to run the HotpotQA benchmark, not to serve the app.
+eval = [
+    "datasets>=2.18.0",
+]
+# Test tooling for the evaluation harness unit tests.
+dev = [
+    "pytest>=8.0",
+]
+
 [build-system]
 requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+# Put the repo root on sys.path so `import evaluation` resolves; the editable
+# install already exposes the src-layout packages (config/retrieval/...).
+pythonpath = ["."]
+testpaths = ["evaluation/tests"]
