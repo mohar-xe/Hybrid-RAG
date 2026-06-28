@@ -40,7 +40,7 @@ import numpy as np
 
 from config.settings import get_settings
 from embeddings.embedder import embedder
-from retrieval.kuzu_store import get_connection
+from retrieval.kuzu_store import get_connection, init_graph_schema
 from constants.logger import setup_logger
 from constants.exceptions import GraphError
 
@@ -52,6 +52,11 @@ _HNSW_M = 16              # graph connectivity (higher = better recall, more mem
 _EF_CONSTRUCTION = 200    # build-time accuracy/speed trade-off
 _MIN_EF = 64              # query-time search breadth (must be >= neighbors)
 _DEFAULT_NEIGHBORS = 10   # nearest neighbours examined per entity
+# Minimum character-trigram Jaccard overlap required *in addition* to embedding
+# cosine before two names are merged. Short entity names embed with a high
+# cosine floor (anisotropy), so cosine alone matches unrelated names; requiring
+# real surface overlap removes those false positives. Tune if it under-merges.
+_MIN_LEXICAL_JACCARD = 0.2
 
 
 @dataclass(frozen=True)
@@ -204,6 +209,30 @@ def _ann_candidate_pairs(
     return pairs
 
 
+def _lexical_similarity(a: str, b: str) -> float:
+    """Character-trigram Jaccard overlap of two names (case/space-insensitive).
+
+    A cheap, language-agnostic surface-similarity signal used to *gate* embedding
+    matches. nomic-embed-text vectors of short strings sit on a high cosine floor
+    (anisotropy), so cosine >= 0.90 alone pairs unrelated names like 'MLP' with
+    'KANs', or 'Michael Griebel' with 'KANs'. Requiring genuine string overlap as
+    well removes those cross-domain false positives, while real variants
+    ('B-spline'/'splines', 'X theorem'/'generalized X theorem') still pass.
+
+    Trade-off: acronym<->expansion pairs ('KAN'/'Kolmogorov-Arnold Network') are
+    NOT caught by this gate. That is accepted on purpose — a missed merge is
+    cheap and re-runnable; an over-merge silently destroys distinct entities.
+    """
+    def _trigrams(s: str) -> set[str]:
+        s = " " + " ".join(s.lower().split()) + " "
+        return {s[i:i + 3] for i in range(len(s) - 2)} if len(s) >= 3 else {s}
+
+    ta, tb = _trigrams(a), _trigrams(b)
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / len(ta | tb)
+
+
 # --------------------------------------------------------------------------- #
 # Public API
 # --------------------------------------------------------------------------- #
@@ -225,6 +254,14 @@ def find_merge_candidates(
         threshold = settings.graph.merge_similarity_threshold
     if conn is None:
         _, conn = get_connection()
+
+    # Ensure the graph schema exists first. On a fresh clone (or after running
+    # only `ingest --no-graph`), opening the Kùzu DB creates an *empty* database
+    # with no `Entity` table, so the ALTER in `_ensure_embedding_column` would
+    # raise "Binder exception: Table Entity does not exist". `init_graph_schema`
+    # is idempotent (CREATE ... IF NOT EXISTS): a populated graph is untouched,
+    # and an empty one degrades cleanly to "no merge candidates".
+    init_graph_schema(conn=conn)
 
     dim = settings.embedding.embed_dim
     _ensure_embedding_column(conn, dim)
@@ -248,6 +285,11 @@ def find_merge_candidates(
 
     candidates: list[MergeCandidate] = []
     for a, b, sim in _ann_candidate_pairs(names, vectors, threshold, neighbors):
+        # Gate the embedding match on real surface overlap: cosine alone is not
+        # discriminative for short names (anisotropy floor ~0.90), so without
+        # this, unrelated names like 'MLP'/'KANs' become "duplicates".
+        if _lexical_similarity(a, b) < _MIN_LEXICAL_JACCARD:
+            continue
         keep = _pick_canonical(conn, {a, b})
         drop = b if keep == a else a
         candidates.append(MergeCandidate(keep=keep, drop=drop, similarity=sim))
@@ -348,49 +390,41 @@ def merge_similar_nodes(
     """Find near-duplicate entities and, when ``apply`` is True, merge them.
 
     With ``apply=False`` (default) this is a dry run: it returns the candidate
-    pairs only, leaving the graph untouched so the user can decide. With
-    ``apply=True`` transitive duplicates (A~B, B~C) are grouped via union-find
-    and each group collapses into a single canonical node.
+    pairs only, leaving the graph untouched so the user can decide.
+
+    With ``apply=True`` duplicates are merged **without transitive chaining**.
+    Candidate pairs are processed highest-similarity first and a canonical node
+    *absorbs* its duplicates, but a node that has already been merged away can
+    never become a survivor, and a surviving node can never be folded away. This
+    deliberately replaces single-linkage union-find: entity names embed with a
+    high cosine floor, so a few false-positive pairs under union-find can bridge
+    unrelated clusters (people, methods, citations) into one giant component that
+    collapses onto the highest-degree node. Absorb-only merging bounds the blast
+    radius of any stray false positive to a single fold. True multi-spelling
+    duplicates that are each similar to the same canonical still all collapse
+    onto it; chains whose endpoints are not themselves similar do not.
     """
     _, conn = get_connection()
     candidates = find_merge_candidates(threshold, neighbors=neighbors, conn=conn)
     if not apply or not candidates:
         return candidates
 
-    # Union-find so transitive near-duplicates collapse into one canonical node.
-    parent: dict[str, str] = {}
-
-    def find(x: str) -> str:
-        parent.setdefault(x, x)
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    def union(a: str, b: str) -> None:
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[rb] = ra
-
-    for c in candidates:
-        union(c.keep, c.drop)
-
-    groups: dict[str, set[str]] = {}
-    for node in list(parent):
-        groups.setdefault(find(node), set()).add(node)
-
-    merged_groups = 0
-    for members in groups.values():
-        if len(members) < 2:
+    # Roles are sticky: a 'keep' stays a survivor and a 'drop' stays merged-away,
+    # so no node is ever both -- which is exactly what prevents A->B->C chaining.
+    role: dict[str, str] = {}
+    applied = 0
+    for c in candidates:  # already sorted by similarity, highest first
+        if role.get(c.drop) is not None:   # drop already merged (as survivor or dropped)
             continue
-        canonical = _pick_canonical(conn, members)
-        for member in members:
-            if member != canonical:
-                merge_nodes(canonical, member, conn=conn)
-        merged_groups += 1
+        if role.get(c.keep) == "drop":     # keep was merged away -> merging here would chain
+            continue
+        merge_nodes(c.keep, c.drop, conn=conn)
+        role[c.keep] = "keep"
+        role[c.drop] = "drop"
+        applied += 1
 
     LOGGER.info(
-        f"Applied merges across {merged_groups} group(s) "
-        f"from {len(candidates)} candidate pair(s)."
+        f"Applied {applied} merge(s) from {len(candidates)} candidate pair(s) "
+        f"(absorb-only, no transitive chaining)."
     )
     return candidates

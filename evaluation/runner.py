@@ -58,7 +58,13 @@ def build_run_specs(modes: list[config.ModeSpec] | None = None) -> list[RunSpec]
     """The 7-row run matrix: direct + (3 retrieval modes x rerank on/off)."""
     modes = modes if modes is not None else config.RETRIEVAL_MODES
     specs: list[RunSpec] = [
-        RunSpec(config.DIRECT_MODE, rerank=False, use_vector=False, use_bm25=False, use_graph=False)
+        RunSpec(
+            config.DIRECT_MODE,
+            rerank=False,
+            use_vector=False,
+            use_bm25=False,
+            use_graph=False,
+        )
     ]
     for mode in modes:
         for rerank in (False, True):
@@ -74,7 +80,9 @@ def build_run_specs(modes: list[config.ModeSpec] | None = None) -> list[RunSpec]
     return specs
 
 
-def _score_run(spec: RunSpec, outcomes: list[tuple[dict, object]], top_k: int) -> RunResult:
+def _score_run(
+    spec: RunSpec, outcomes: list[tuple[dict, object]], top_k: int
+) -> RunResult:
     f1s, ems, recalls = [], [], []
     hits, ans_in_ctx = [], []
     retrieval_ms, generation_ms, total_ms = [], [], []
@@ -86,7 +94,11 @@ def _score_run(spec: RunSpec, outcomes: list[tuple[dict, object]], top_k: int) -
         ems.append(metrics.exact_match(outcome.answer, gold))
         recalls.append(metrics.token_recall(outcome.answer, gold))
         if is_retrieval:
-            hits.append(metrics.retrieval_hit_at_k(outcome.retrieved_titles, record["supporting_titles"]))
+            hits.append(
+                metrics.retrieval_hit_at_k(
+                    outcome.retrieved_titles, record["supporting_titles"]
+                )
+            )
             ans_in_ctx.append(metrics.answer_in_context(gold, outcome.contexts))
         retrieval_ms.append(outcome.retrieval_ms)
         generation_ms.append(outcome.generation_ms)
@@ -129,6 +141,23 @@ def run_all(
     id_to_embedding = {r["id"]: emb for r, emb in zip(records, embeddings)}
 
     specs = build_run_specs(modes)
+    # comment above/below to use all or only three.
+    """specs = [
+        RunSpec(
+            mode_name="all_three",
+            rerank=False,
+            use_vector=True,
+            use_bm25=True,
+            use_graph=True,
+        ),
+        RunSpec(
+            mode_name="all_three",
+            rerank=True,
+            use_vector=True,
+            use_bm25=True,
+            use_graph=True,
+        ),
+    ]"""
     results: list[RunResult] = []
 
     for spec in specs:

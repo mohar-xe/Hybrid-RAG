@@ -37,12 +37,16 @@ class RetrievalResult:
 
 
 def extract_query_entities(question: str) -> list[str]:
-    """Heuristic entity spotting: capitalized multi-char tokens.
+    """Hybrid query entity extraction for graph seeding: YAKE first, LLM fallback.
 
-    Mirrors the heuristic used by the CLI/API query paths so graph retrieval
-    behaves identically here. (A real NER pass is future work.)
+    Thin delegator to the canonical implementation in ``graph.entity_extraction``
+    (YAKE keyphrases, with a DeepSeek LLM fallback when YAKE is empty). Kept here
+    so existing importers — ``from retrieval.search import extract_query_entities``,
+    used by the evaluation harness — keep working unchanged.
     """
-    return [w for w in question.split() if len(w) > 1 and w[0].isupper()]
+    from graph.entity_extraction import extract_query_entities as _impl
+
+    return _impl(question)
 
 
 def _rrf_fuse(result_lists: list[list[RetrievedChunk]], k: int = 60) -> list[RetrievedChunk]:

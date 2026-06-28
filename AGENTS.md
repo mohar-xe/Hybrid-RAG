@@ -20,8 +20,9 @@ truth for what exists**, not the README. Do not assume a planned feature exists 
   (local + remote backends), Kùzu graph store, near-duplicate node merge, **coarse→fine
   cluster-routed dense retrieval**, K-Means/medoid clustering via an explicit `reindex` command,
   **cross-encoder reranking**, Kùzu graph-context lookup, heuristic query router, context
-  assembly + citations, OpenAI-compatible generation, and a FastAPI app (`/ingest` async +
-  status, `/query`, `/health`).
+  assembly + citations, OpenAI-compatible generation, a FastAPI app (`/ingest` async +
+  status, `/query`, `/health`), and a **Gradio demo UI** (`src/demo/app.py`) that exposes
+  retrieval internals for technical demos.
 - **Planned / scaffolded (config may exist but logic is not wired yet):** NLI self-verification
   (`VerifierSettings` exists; `/query` returns `faithfulness: None`), retrieval quality scoring,
   HyDE, RAPTOR summaries, graph community summaries, streaming `/query` responses (the `stream`
@@ -107,6 +108,18 @@ cd src
 uv run uvicorn api.app:app --reload      # http://localhost:8000  (docs at /docs)
 ```
 
+To run the **Gradio demo UI** (exposes retrieval internals for technical demos):
+
+```bash
+cd src
+uv run python demo/app.py                # http://localhost:7860
+```
+
+The Gradio demo is designed for **interview/portfolio use** — it shows every stage of the
+retrieval pipeline (coarse→fine routing, pre/post-rerank candidates, final chunks, graph facts)
+with toggleable features (reranking, knowledge graph). Use it to demonstrate system design
+decisions to technical audiences.
+
 ## Architecture / layout (`src/`)
 
 ```
@@ -121,6 +134,7 @@ context/     builder.py — context assembly + citations    [implemented]
 llm/         generator.py — OpenAI-compatible generation   [implemented]
 reasoning/   router.py — heuristic query routing [implemented]; verifier [planned]
 api/         app.py — FastAPI surface (/ingest, /query, /health) [implemented core]
+demo/        app.py — Gradio UI for interactive demos with retrieval internals [implemented]
 pipeline.py  Typer CLI (ingest, ask, reindex, merge-graph) — real entry point
 ```
 
@@ -183,7 +197,14 @@ no longer drive retrieval.
   itself** before creating `MENTIONED_IN` edges — nothing else inserts `Chunk` nodes, so if you
   drop that MERGE the edges silently never form (the entity→chunk `MATCH` finds no chunk). Pass
   `text`/`source_id` so the node is populated on creation.
-- `get_entity_context` only traverses `RELATES_TO`, filtered by `GRAPH__MIN_RELATION_WEIGHT`.
+- `get_entity_context` does a **multi-hop** BFS over `RELATES_TO`: it follows up to
+  `GRAPH__MAX_HOPS` (default 2) edges out from each seed entity, **bidirectionally**, keeping
+  only relations with weight `> GRAPH__MIN_RELATION_WEIGHT`. This is what lets the graph answer
+  "bridge" questions — seed `A` → `A rel B` (hop 1) → `B rel C` (hop 2) — that a single hop can
+  never reach. Fan-out is capped per node per hop (`GRAPH__PER_HOP_NEIGHBORS`) and the total
+  facts are capped (`GRAPH__MAX_FACTS`); facts come back closest-hop-first, de-duplicated.
+  `hops=1` reproduces the old single-hop behavior (now also bidirectional). `_one_hop_neighbors`
+  is the private per-hop expansion helper.
 - `get_connection()` returns `(db, conn)`. Every graph function
   (`init_graph_schema`, `upsert_triplets`, `link_entities_to_chunk`, `get_entity_context`)
   takes an optional keyword-only `conn=` and opens its own only when none is passed. Ingestion
@@ -239,9 +260,11 @@ Concurrency & thinking:
   `host=... port=...` strings at call sites — `pgvector.py`, `init_db.py`, and `api/app.py`
   all go through `conninfo`.
 - **Graph tuning:** `GraphSettings` (`GRAPH__*`) holds `db_path`,
-  `merge_similarity_threshold` (0.90 — the cosine cutoff for `merge-graph` candidates) and
-  `min_relation_weight` (0.50 — relations at/below this are treated as low-confidence). Route
-  graph behavior through these rather than hard-coding constants.
+  `merge_similarity_threshold` (0.90 — the cosine cutoff for `merge-graph` candidates),
+  `min_relation_weight` (0.50 — relations at/below this are treated as low-confidence), and the
+  multi-hop retrieval knobs `max_hops` (2), `max_facts` (30 — total fact cap), and
+  `per_hop_neighbors` (10 — per-node fan-out per hop). Route graph behavior through these rather
+  than hard-coding constants.
 - **Logging:** obtain loggers with `setup_logger(__name__)` from `constants.logger`. Logs
   go to `logs/app.log` (rotating, 5 MB × 3) plus stdout. Don't use bare `print` for
   diagnostics in library code (the CLI uses `typer.echo` for user-facing output).

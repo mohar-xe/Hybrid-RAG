@@ -1,5 +1,6 @@
 """CLI entry point — ingest files and ask questions."""
 
+from pathlib import Path
 from typing import Optional
 
 import typer
@@ -154,7 +155,9 @@ def ask(
 
     graph_facts = ""
     if strategy["use_graph"]:
-        entities = [w for w in question.split() if len(w) > 1 and w[0].isupper()]
+        from graph.entity_extraction import extract_query_entities
+
+        entities = extract_query_entities(question)
         if entities:
             graph_facts = get_entity_context(entities)
 
@@ -169,6 +172,29 @@ def ask(
             typer.echo(f"  [{c.ref_id}] {c.source_id} — {c.text_preview}...")
 
 
+def _backup_graph_db() -> Optional[Path]:
+    """Copy the Kùzu graph DB to a timestamped sibling backup.
+
+    Returns the backup path, or None if there is no DB file yet. The graph is
+    the product of (expensive) LLM triplet extraction during ingest, and
+    `merge-graph --apply` mutates it irreversibly (duplicates are folded in and
+    DETACH DELETE-d). Kùzu 0.11.x stores the DB as a single file, so a plain
+    file copy is a complete, restorable snapshot — restore with:
+    `cp <backup> <db_path>`.
+    """
+    import shutil
+    from datetime import datetime
+    from config.settings import get_settings
+
+    db_path = Path(get_settings().graph.db_path)
+    if not db_path.exists():
+        return None
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    dest = db_path.with_name(f"{db_path.name}.bak-{stamp}")
+    shutil.copy2(db_path, dest)
+    return dest
+
+
 @app.command()
 def merge_graph(
     threshold: Optional[float] = typer.Option(
@@ -179,13 +205,36 @@ def merge_graph(
         False, "--apply",
         help="Apply the merges. Without this flag it is a dry run (list only).",
     ),
+    backup: Optional[bool] = typer.Option(
+        None, "--backup/--no-backup",
+        help="With --apply: back up the graph DB before merging. If omitted you "
+             "are prompted (merges are irreversible).",
+    ),
 ):
     """Merge near-duplicate graph entities by embedding similarity.
 
     Run this *after* ingestion. By default it only lists the candidate pairs
-    (the decision is yours); pass --apply to actually merge them.
+    (the decision is yours); pass --apply to actually merge them. Because
+    --apply is irreversible (duplicates are folded in and deleted) and the graph
+    is costly to regenerate (LLM extraction), you are prompted to back up the
+    graph DB first unless --backup/--no-backup is given.
     """
     from graph.merge import merge_similar_nodes
+
+    if apply:
+        do_backup = backup if backup is not None else typer.confirm(
+            "Merges are irreversible and the graph is LLM-generated. "
+            "Back up the graph DB before applying?",
+            default=True,
+        )
+        if do_backup:
+            dest = _backup_graph_db()
+            typer.echo(
+                f"Backed up graph DB -> {dest}" if dest is not None
+                else "No graph DB file found yet; nothing to back up."
+            )
+        else:
+            typer.echo("Proceeding without a backup.")
 
     candidates = merge_similar_nodes(threshold, apply=apply)
     if not candidates:

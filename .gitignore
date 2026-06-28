@@ -3,6 +3,7 @@
 .env.local
 .env.*.local
 .venv
+.pytest_cache
 
 # Personal folders
 data/

@@ -14,7 +14,7 @@ Four retrieval configurations, each (where applicable) with reranking **on** and
 | `direct` | — | — | — | n/a | Closed-book baseline: the LLM answers from parametric knowledge, no retrieval. |
 | `semantic` | ✅ | | | on/off | Dense pgvector retrieval only. |
 | `semantic_bm25` | ✅ | ✅ | | on/off | Dense + sparse, fused with Reciprocal Rank Fusion. |
-| `all_three` | ✅ | ✅ | ✅ | on/off | Dense + sparse + Kùzu graph facts. |
+| `all_three` | ✅ | ✅ | ✅ | on/off | Dense + sparse + **multi-hop** Kùzu graph facts. |
 
 These map directly onto `src/retrieval/search.py::search(...)`, the explicit
 (non-routing) retrieval entry point. The heuristic/agentic router is intentionally
@@ -81,6 +81,27 @@ Useful flags: `--n` (query count), `--seed`, `--top-k` (final chunks scored),
 If you ran `ingest` **without** `--with-graph`, pass `--no-graph-ingested` to
 `run` so the report notes that `all_three`'s graph facts were empty.
 
+## Quick offline check (no live stack)
+
+The full matrix needs PostgreSQL + Ollama + the generator. To validate the
+**all-three** wiring — dense + sparse + the **multi-hop** knowledge graph, fused
+and assembled into a prompt — without any of that, run the dummy-data smoke
+pipeline (it stubs the dense/sparse retrievers, runs the *real* RRF fusion, the
+*real* multi-hop graph BFS against a throwaway Kùzu DB, and the *real* context
+builder; it stops before generation):
+
+```bash
+uv run python -m evaluation.smoke_all_three     # prints a per-signal breakdown; exits 0/1
+```
+
+The multi-hop graph traversal itself is covered by a unit test that needs no
+services (it seeds a temp Kùzu graph and asserts 2-hop "bridge" facts surface
+where a single hop can't):
+
+```bash
+uv run --extra dev pytest evaluation/tests/test_multihop_graph.py
+```
+
 ## Outputs
 
 `evaluation/results/eval_<UTC-timestamp>.{json,csv,md}`:
@@ -100,7 +121,8 @@ evaluation/
   metrics.py    pure F1 / EM / recall / hit@k / answer-in-context / latency aggregation
   report.py     JSON + CSV + markdown writers
   run_eval.py   typer CLI: prepare / ingest / run / all
-  tests/        unit tests for metrics + seeded-selector determinism
+  smoke_all_three.py  offline all-three (dense+sparse+multi-hop graph) smoke pipeline on dummy data
+  tests/        unit tests for metrics, seeded-selector determinism, and multi-hop graph traversal
 ```
 
 ## Notes & caveats

@@ -37,6 +37,9 @@ CREATE_INDEX_MEDOID = """CREATE INDEX IF NOT EXISTS idx_chunks_medoid ON chunks 
 CREATE_INDEX_CLUSTER = """CREATE INDEX IF NOT EXISTS idx_chunks_cluster ON chunks (cluster_id)"""
 
 def init_db():
+    if not settings.database.init_schema:
+        LOGGER.info("DATABASE__INIT_SCHEMA is false — skipping schema init (read-only mode).")
+        return
     try:
         with psycopg.connect(settings.database.conninfo) as conn:
             with conn.cursor() as cur: 

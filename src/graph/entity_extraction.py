@@ -252,3 +252,162 @@ def extract_entities_batch(
 
 # Backward-compatible alias: older callers / notebooks import this name.
 extract_entities_llm = extract_entities_local
+
+
+# ---------------------------------------------------------------------------
+# Query-time entity extraction (hybrid: YAKE keyphrases -> LLM fallback)
+# ---------------------------------------------------------------------------
+# The retrieval paths (CLI `ask`, FastAPI `/query`, the Gradio demo, and the
+# forced-search module) need the *entities mentioned in a question* to seed the
+# Kùzu graph lookup (`get_entity_context`). This is the single canonical home
+# for that, replacing the old crude "capitalized whitespace tokens" heuristic
+# that was duplicated at every call site.
+#
+# Strategy (cheap-first): run YAKE — a fast, local, unsupervised keyphrase
+# extractor already used during ingestion — and use its keyphrases as graph
+# seeds. Only when YAKE finds nothing (e.g. a pronoun-only question like "tell
+# me about it") do we pay for an LLM call to recover entities. YAKE preserves
+# the original casing of phrases ("Albert Einstein", "Nobel Prize"), which
+# matters because `get_entity_context` matches `Entity.name` *exactly*.
+
+# Query-tuned YAKE knobs, deliberately more permissive than the chunker's
+# indexing config: a high dedup limit keeps multi-word phrases *and* their
+# component tokens ("Albert Einstein" *and* "Einstein") so more candidate seeds
+# get a chance to match a stored Entity name. Surplus non-matching seeds are
+# harmless (they simply find no fact); missing a real entity is not.
+_QUERY_YAKE_NGRAM = 3
+_QUERY_YAKE_TOP = 10
+_QUERY_YAKE_DEDUP = 0.9
+
+
+def _dedupe_preserve(items: list[str]) -> list[str]:
+    """Order-preserving de-duplication of a string list."""
+    return list(dict.fromkeys(items))
+
+
+def extract_keyphrases_yake(
+    text: str,
+    *,
+    n: int = _QUERY_YAKE_NGRAM,
+    top: int = _QUERY_YAKE_TOP,
+    dedup_lim: float = _QUERY_YAKE_DEDUP,
+) -> list[str]:
+    """Return YAKE keyphrases for ``text`` (original casing preserved).
+
+    Resilient by design: any failure (missing/broken YAKE, empty text) yields an
+    empty list rather than raising, because this runs in the online query hot
+    path. An empty return is also the signal the hybrid extractor uses to fall
+    back to the LLM.
+    """
+    if not text or not text.strip():
+        return []
+    try:
+        import yake
+
+        extractor = yake.KeywordExtractor(lan="en", n=n, dedup_lim=dedup_lim, top=top)
+        return [kw for kw, _score in extractor.extract_keywords(text)]
+    except Exception as exc:
+        LOGGER.warning(f"YAKE keyphrase extraction failed: {exc}")
+        return []
+
+
+def _parse_string_array(content: str) -> list[str]:
+    """Parse a model response into a de-duplicated list of non-empty strings.
+
+    Tolerates ``` / ```json fences and an accidental object wrapper
+    (``{"entities": [...]}``); silently yields ``[]`` for an empty/garbled
+    response (the caller treats "no entities" as "skip the graph", never error).
+    """
+    content = (content or "").strip()
+    if content.startswith("```"):
+        content = content.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    if not content:
+        return []
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        LOGGER.warning("LLM query NER returned non-JSON; ignoring.")
+        return []
+    if isinstance(data, dict):
+        data = next((v for v in data.values() if isinstance(v, list)), [])
+    if not isinstance(data, list):
+        return []
+    return _dedupe_preserve([item.strip() for item in data if isinstance(item, str) and item.strip()])
+
+
+def extract_query_entities_llm(query: str) -> list[str]:
+    """LLM fallback NER for a query: return entity/concept surface strings.
+
+    Uses the remote OpenAI-compatible endpoint (``NER__*``, default DeepSeek) —
+    a general model with a query-focused NER prompt, which recovers entities
+    better than keyphrase statistics when YAKE comes up empty. Raises
+    ``ConfigurationError`` if the API key is unset (the hybrid wrapper catches
+    it and degrades to no seeds).
+    """
+    api_key = ner.api_key.get_secret_value()
+    if not api_key:
+        raise ConfigurationError(
+            "NER API key is not set. Add NER__API_KEY to your .env to use the "
+            "LLM query-entity fallback (the 'deepseek' backend)."
+        )
+
+    system = (
+        "You extract the named entities and salient noun-phrase concepts from a "
+        "search question — the things a knowledge graph would index (people, "
+        "organizations, places, works, systems, models, theories, events, "
+        "methods). Return ONLY a JSON array of the entity surface strings exactly "
+        'as a graph would store them (e.g. ["Albert Einstein", "Nobel Prize"]). '
+        "No prose, no markdown, no objects, no duplicates."
+    )
+    payload = {
+        "model": ner.model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": query},
+        ],
+        "temperature": ner.temperature,
+        "max_tokens": 256,
+        "stream": False,
+    }
+    if ner.disable_thinking:
+        # DeepSeek hybrid models default to reasoning; disabling it keeps the
+        # token budget for the JSON answer and cuts latency.
+        payload["thinking"] = {"type": "disabled"}
+
+    response = httpx.post(
+        f"{ner.base_url.rstrip('/')}/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}"},
+        json=payload,
+        timeout=ner.timeout,
+    )
+    response.raise_for_status()
+    content = response.json()["choices"][0]["message"]["content"]
+
+    entities = _parse_string_array(content)
+    LOGGER.info(f"LLM query NER extracted {len(entities)} entities (deepseek/{ner.model}).")
+    return entities
+
+
+def extract_query_entities(query: str, *, use_llm_fallback: bool = True) -> list[str]:
+    """Canonical query entity extractor used to seed graph retrieval.
+
+    Hybrid, cheap-first:
+      1. YAKE keyphrases — fast, local, no API cost. If it returns anything,
+         those are the seeds ("if YAKE produces entities, good").
+      2. Otherwise (YAKE empty) fall back to the LLM NER for better recall.
+
+    The LLM step is best-effort: a missing API key or a transient error degrades
+    to an empty list (the query still answers, just without graph facts). Pass
+    ``use_llm_fallback=False`` for callers that must stay cheap/offline (e.g. the
+    router's complexity signal), restricting extraction to YAKE only.
+    """
+    phrases = _dedupe_preserve(extract_keyphrases_yake(query))
+    if phrases:
+        return phrases
+    if not use_llm_fallback:
+        return []
+    try:
+        return extract_query_entities_llm(query)
+    except Exception as exc:
+        LOGGER.warning(f"LLM query-entity fallback unavailable: {exc}")
+        return []

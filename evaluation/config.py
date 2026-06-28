@@ -16,7 +16,7 @@ SEED = 42
 N_QUERIES = 100
 
 # --- HotpotQA source (HuggingFace `datasets`) ---
-HF_DATASET = "hotpot_qa"
+HF_DATASET = "hotpotqa/hotpot_qa"   # namespaced id (datasets>=4 rejects bare "hotpot_qa")
 HF_CONFIG = "distractor"      # 10 paragraphs/question: 2 gold + 8 distractors
 HF_SPLIT = "validation"       # 7,405 questions; test has no public answers
 

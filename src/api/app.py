@@ -199,7 +199,9 @@ async def query(req: QueryRequest):
 
     graph_facts = ""
     if strategy["use_graph"]:
-        entities = [w for w in req.question.split() if w[0].isupper() and len(w) > 1]
+        from graph.entity_extraction import extract_query_entities
+
+        entities = extract_query_entities(req.question)
         if entities:
             graph_facts = get_entity_context(entities)
 

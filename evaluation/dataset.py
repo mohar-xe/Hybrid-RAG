@@ -74,12 +74,28 @@ def _load_hotpotqa_split():
             "eval extra:  uv sync --extra eval   (or  pip install 'datasets>=2.18.0')."
         ) from e
 
-    # Newer `datasets` may require trust_remote_code for script-based datasets;
-    # older/newer parquet-backed versions reject the kwarg. Try both.
-    try:
-        return load_dataset(config.HF_DATASET, config.HF_CONFIG, split=config.HF_SPLIT, trust_remote_code=True)
-    except TypeError:
-        return load_dataset(config.HF_DATASET, config.HF_CONFIG, split=config.HF_SPLIT)
+    # `datasets` >= 4 requires a namespaced repo id ("hotpotqa/hotpot_qa") and
+    # rejects the bare canonical id ("hotpot_qa") with an HfUriError; older
+    # versions accepted the bare id. Try the configured id first, then the
+    # alternate forms, so the harness works across `datasets` versions. The inner
+    # try/except handles `trust_remote_code` being required (script datasets) or
+    # rejected (parquet-backed datasets).
+    bare = config.HF_DATASET.split("/")[-1]
+    candidates = [config.HF_DATASET, f"hotpotqa/{bare}", bare]
+    seen: set[str] = set()
+    last_err: Exception | None = None
+    for ds_id in candidates:
+        if ds_id in seen:
+            continue
+        seen.add(ds_id)
+        try:
+            try:
+                return load_dataset(ds_id, config.HF_CONFIG, split=config.HF_SPLIT, trust_remote_code=True)
+            except TypeError:
+                return load_dataset(ds_id, config.HF_CONFIG, split=config.HF_SPLIT)
+        except Exception as e:  # invalid id for this datasets version, network, etc.
+            last_err = e
+    raise last_err if last_err else RuntimeError("Could not load the HotpotQA split.")
 
 
 def prepare_dataset(

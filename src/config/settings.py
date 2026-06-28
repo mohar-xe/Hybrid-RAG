@@ -2,7 +2,7 @@ from typing import Annotated, Literal
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import SecretStr, Field
+from pydantic import SecretStr, Field, field_validator
 
 # Resolve the project-root .env regardless of the current working directory
 # (e.g. when a module is imported from a notebook under src/graph/).
@@ -10,6 +10,12 @@ _ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 # Project root (the directory holding .env). Used for resolving allow-listed
 # paths (e.g. the /ingest directory) independent of the current working dir.
 _ROOT = _ENV_FILE.parent
+# Package root: the `src/` directory that holds this config package. The Kùzu
+# graph DB is anchored here so it always resolves to the *same* file regardless
+# of the current working directory. Historically the DB is created under
+# `src/data/` because the CLI is launched from inside `src/`; anchoring keeps
+# that single populated location canonical no matter where a command is run.
+_SRC = Path(__file__).resolve().parents[1]
 
 
 class DatabaseSettings(BaseSettings):
@@ -18,6 +24,11 @@ class DatabaseSettings(BaseSettings):
     db_name: str
     user: str
     password: SecretStr
+    # When false, ``init_db()`` skips all DDL (CREATE EXTENSION/TABLE/INDEX,
+    # ALTER). Set false for a read-only deployment against a FROZEN database
+    # whose connecting role may lack DDL privileges (e.g. a restricted Supabase
+    # role) — the schema already exists, so there is nothing to migrate.
+    init_schema: bool = True
 
     @property
     def conninfo(self) -> str:
@@ -39,18 +50,67 @@ class DatabaseSettings(BaseSettings):
         return " ".join(parts)
 
 class GraphSettings(BaseSettings):
-    db_path: Path = Path("data/kuzu_db")
+    # Absolute, CWD-independent path to the embedded Kùzu graph DB. Anchored to
+    # the package root rather than left relative: a relative "data/kuzu_db"
+    # resolves against the *current working directory*, so running `ingest` from
+    # src/ but `merge-graph`/`ask` from the project root would open two different
+    # files — silently creating an empty graph. Anchoring guarantees every
+    # command opens the one populated DB.
+    db_path: Path = _SRC / "data" / "kuzu_db"
     # Cosine similarity at/above which two entity-name embeddings are treated
     # as "near-same" and become merge candidates (explicit, user-invoked).
     merge_similarity_threshold: Annotated[float, Field(ge=0.0, le=1.0)] = 0.90
     # Relations with weight at/below this are treated as low-confidence and are
     # excluded from graph retrieval (weight also drives visual node proximity).
     min_relation_weight: Annotated[float, Field(ge=0.0, le=1.0)] = 0.50
+    # --- Multi-hop graph retrieval (get_entity_context) ---
+    # How many RELATES_TO edges to follow out from each seed entity. 1 == the
+    # old single-hop behavior (a seed's direct relations only); >=2 lets the
+    # retriever surface "bridge" facts — A->B (hop 1) then B->C (hop 2) — that
+    # multi-hop questions (e.g. HotpotQA) need but a single hop can never reach.
+    max_hops: Annotated[int, Field(ge=1, le=5)] = 2
+    # Hard cap on the total number of distinct facts returned, so a densely
+    # connected seed can't flood the context budget as the hop count grows.
+    max_facts: Annotated[int, Field(ge=1, le=500)] = 30
+    # Max edges expanded per node per hop (BFS fan-out). Bounds the breadth of
+    # each hop so one high-degree hub doesn't dominate the traversal.
+    per_hop_neighbors: Annotated[int, Field(ge=1, le=100)] = 10
+
+    @field_validator("db_path")
+    @classmethod
+    def _anchor_db_path(cls, v: Path) -> Path:
+        """Anchor a relative ``db_path`` (e.g. a ``GRAPH__DB_PATH`` override) to
+        the package root so it never resolves against the variable current
+        working directory. Absolute paths are left untouched."""
+        return v if v.is_absolute() else (_SRC / v).resolve()
 
 class EmbeddingSettings(BaseSettings):
-    model: str = "nomic-embed-text"
+    """Query/document embedding configuration (``EMBEDDING__*``).
+
+    Self-contained (own ``env_prefix``) so it can be read without building the
+    full ``Settings`` — mirroring ``ExtractionSettings`` / ``NERSettings``.
+
+    Two backends produce the same 256-d (Matryoshka-truncated) vectors:
+      * ``ollama``                — local Ollama server (default). Used for
+        ingestion and local dev; requires Ollama running.
+      * ``sentence_transformers`` — in-process HF model, no Ollama. Used for the
+        read-only / free deployment (e.g. HF Spaces) where running Ollama isn't
+        practical. Loads ``st_model`` lazily on first use.
+    """
+    model_config = SettingsConfigDict(
+        env_prefix="embedding__", env_file=_ENV_FILE, extra="ignore"
+    )
+    backend: Literal["ollama", "sentence_transformers"] = "ollama"
+    model: str = "nomic-embed-text"                     # Ollama model name
+    st_model: str = "nomic-ai/nomic-embed-text-v1.5"    # sentence-transformers model id
     embed_dim: int = 256
     batch_size: int = 128
+    # Task prefix prepended to every input before embedding. Empty by default to
+    # match the FROZEN corpus: Ollama's nomic-embed-text template is
+    # `{{ .Prompt }}` (no prefix), so the stored vectors are prefix-free. Only
+    # set this if you re-embed the corpus under a different convention — a query
+    # prefix that the documents didn't use puts queries in a different subspace.
+    query_prefix: str = ""
 
 class GeneratorSettings(BaseSettings):
     base_url: str
