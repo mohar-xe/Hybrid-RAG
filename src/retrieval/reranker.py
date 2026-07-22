@@ -147,11 +147,12 @@ def _rerank_jina(query: str, chunks: list, top_k: int) -> list:
     import httpx
 
     api_key = settings.reranker.api_key.get_secret_value()
-    model = settings.reranker.api_model or "jina-reranker-v2-base-en"
+    base_url = settings.reranker.api_base_url or "https://api.jina.ai/v1/rerank"
+    model = settings.reranker.api_model or "jina-reranker-v2-base-multilingual"
     texts = [c.text for c in chunks]
 
     resp = httpx.post(
-        "https://api.jina.ai/v1/rerank",
+        base_url,
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",

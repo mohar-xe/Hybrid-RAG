@@ -1,8 +1,8 @@
-from typing import Annotated, Literal
 from pathlib import Path
+from typing import Annotated, Literal
 
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import SecretStr, Field, field_validator
 
 # Resolve the project-root .env regardless of the current working directory
 # (e.g. when a module is imported from a notebook under src/graph/).
@@ -226,7 +226,7 @@ class NERSettings(BaseSettings):
 class RerankerSettings(BaseSettings):
     """Cross-encoder reranking configuration with API-first + fallback."""
 
-    model: str = "cross-encoder/ms-marco-TinyBERT-L-2-v2"
+    model: str = "jina-reranker-v2-base-multilingual"
     top_k: int = 5
     # Backend selection
     backend: Literal["api", "jina", "ollama", "hf"] = "jina"
