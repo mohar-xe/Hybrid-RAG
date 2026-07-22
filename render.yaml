@@ -49,6 +49,28 @@ services:
       - key: API__API_KEY
         sync: false
 
+      # ------------------------------------------------------------------
+      # Disable all local-model fallbacks — Docker has no Ollama or spaCy.
+      # The primary API is the only path; a failure -> a clean error, not a
+      # cryptic connection-refused to a non-existent local process.
+      # ------------------------------------------------------------------
+      - key: EXTRACTION__FALLBACK_ENABLED
+        value: "false"
+      - key: NER__FALLBACK_ENABLED
+        value: "false"
+      - key: EMBEDDING__FALLBACK_ENABLED
+        value: "false"
+      - key: GENERATOR__FALLBACK_ENABLED
+        value: "false"
+      - key: RERANKER__FALLBACK_ENABLED
+        value: "false"
+      - key: METADATA__FALLBACK_ENABLED
+        value: "false"
+      - key: METADATA__FALLBACK_BACKEND
+        value: "none"
+      - key: VERIFIER__FALLBACK_ENABLED
+        value: "false"
+
 databases:
   - name: hybrid-rag-db
     plan: free

@@ -198,8 +198,8 @@ class NERSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="ner__", env_file=_ENV_FILE, extra="ignore"
     )
-    base_url: str = "https://api.deepseek.com"
-    model: str = "deepseek-v4-flash"
+    base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai"
+    model: str = "gemini-3.6-flash"
     api_key: SecretStr = SecretStr("")
     temperature: float = 0.0
     timeout: float = 120.0

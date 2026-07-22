@@ -48,8 +48,13 @@ External services this project talks to (must be running for end-to-end use):
   `local` extraction backend is selected, KG extraction via the fine-tuned `hgr-triplet:q4`
   model (produced by the sibling `finetuning_qwen3.5` project; `model/` holds the GGUF +
   an Ollama `Modfile`).
-- **A remote OpenAI-compatible API** for the default `deepseek` extraction backend
-  (DeepSeek V4 Flash). Requires `NER__API_KEY` in `.env`. See "Entity-extraction backends".
+- **Remote OpenAI-compatible APIs** for the default backends (Gemini for NER/metadata,
+  Mistral for embeddings/reranker, OpenRouter for generation). See "Entity-extraction backends".
+
+The default NER backend has changed from DeepSeek to Gemini
+(`https://generativelanguage.googleapis.com/v1beta/openai`, model `gemini-3.6-flash`)
+to match the deployment config. The `EXTRACTION__BACKEND=deepseek` still refers to
+whatever `NER__*` settings point at — the naming is historical.
 
 ## Running
 
@@ -238,6 +243,12 @@ Integrated in `embeddings/embedder.py`, `ingestion/document_cluster.py`,
 
 API-only deployment. No local models (sentence-transformers, spaCy, Ollama). All defaults
 use remote APIs. See `Dockerfile`, `docker-compose.yml`, `.dockerignore`.
+
+**All fallbacks are disabled in deployment.** Every component (NER, extraction, embedding,
+generator, reranker, metadata, verifier) has `*__FALLBACK_ENABLED=false` set in `render.yaml`.
+When a primary API fails, the error propagates cleanly rather than trying to hit a non-existent
+Ollama at `http://localhost:11434` or import an uninstalled spaCy. Settings.py defaults keep
+`fallback_enabled=True` for local dev.
 
 ## Conventions (follow these)
 

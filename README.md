@@ -154,7 +154,6 @@ Run end to end against the bundled sample PDF (the package uses a **src-layout**
 ```bash
 cd src
 uv run python pipeline.py ingest ../data/sample.pdf --type pdf   # extract → chunk → embed → store (+ graph)
-uv run python pipeline.py reindex                                # cluster chunks + mark medoids
 uv run python pipeline.py ask "What is this document about?" --verbose
 ```
 
@@ -296,7 +295,7 @@ The included [`render.yaml`](render.yaml) declares both the web service and a fr
    ```sql
    CREATE EXTENSION IF NOT EXISTS vector;
    ```
-6. Set the **API secrets** in your web service's **Environment** tab (each is marked `sync: false` — click the pencil to fill it in):
+6. The Blueprint pre-configures the following. For `sync: false` items, click the pencil to fill in your values:
 
 | Variable | What to put |
 |----------|-------------|
@@ -311,6 +310,8 @@ The included [`render.yaml`](render.yaml) declares both the web service and a fr
 | `RERANKER__API_BASE_URL` | `https://api.mistral.ai/v1` |
 | `RERANKER__API_KEY` | Same Mistral key |
 | `API__API_KEY` | Pick any secret string (e.g. `my-secret-key-123`) |
+
+   All local-model fallbacks are **disabled in the blueprint** (`*__FALLBACK_ENABLED=false`) — the deployment is API-only. If a primary API fails, you get a clean error rather than a connection-refused to a non-existent Ollama or missing spaCy.
 
 7. Go to your **Web Service** → **Manual Deploy** → **Deploy latest commit**. Wait for **Live** (~3 min).
 
@@ -346,6 +347,19 @@ RERANKER__API_BASE_URL=https://api.mistral.ai/v1
 RERANKER__API_MODEL=mistral-large-latest
 RERANKER__API_KEY=<your-key>
 API__API_KEY=<your-key>
+```
+
+   Also add these to **disable local fallbacks** (no Ollama or spaCy in the container):
+
+```
+EXTRACTION__FALLBACK_ENABLED=false
+NER__FALLBACK_ENABLED=false
+EMBEDDING__FALLBACK_ENABLED=false
+GENERATOR__FALLBACK_ENABLED=false
+RERANKER__FALLBACK_ENABLED=false
+METADATA__FALLBACK_ENABLED=false
+METADATA__FALLBACK_BACKEND=none
+VERIFIER__FALLBACK_ENABLED=false
 ```
 
 7. Deploy. Render builds and starts the service.
