@@ -409,21 +409,28 @@ async def health():
     except Exception:
         pass
 
-    # Use the configured Ollama endpoint rather than a hardcoded localhost URL.
+    # Only check Ollama when the extraction backend actually uses it
+    # (Render deployments use remote APIs, not a local Ollama).
+    ollama_needed = settings.extraction.backend == "local"
     ollama_ok = False
-    ollama_url = settings.extraction.base_url.rstrip("/")
-    try:
-        r = httpx.get(f"{ollama_url}/api/tags", timeout=3.0)
-        ollama_ok = r.status_code == 200
-    except Exception:
-        pass
+    if ollama_needed:
+        ollama_url = settings.extraction.base_url.rstrip("/")
+        try:
+            r = httpx.get(f"{ollama_url}/api/tags", timeout=3.0)
+            ollama_ok = r.status_code == 200
+        except Exception:
+            pass
 
     graph_ok = settings.graph.db_path.exists()
 
-    status = "healthy" if (db_ok and ollama_ok) else "degraded"
+    status = (
+        "degraded" if (not db_ok or (ollama_needed and not ollama_ok)) else "healthy"
+    )
     return {
         "status": status,
         "database": "ok" if db_ok else "unreachable",
-        "ollama": "ok" if ollama_ok else "unreachable",
+        "ollama": ("ok" if ollama_ok else "unreachable")
+        if ollama_needed
+        else "not_configured",
         "graph": "ok" if graph_ok else "not_initialized",
     }

@@ -332,7 +332,7 @@ async function pollTask() {
   polling = true;
   for (let i = 0; i < 120; i++) {
     try {
-      const r = await api('GET', `/ingest/${taskId}`);
+      const r = await apiWithAuth('GET', `/ingest/${taskId}`);
       const d = await r.json();
       if (d.status === 'completed') {
         taskStatus.textContent = `✓ ${d.chunks || 0} chunks indexed`;
@@ -383,7 +383,7 @@ ingestBtn.addEventListener('click', async () => {
   if (key()) fd.append('api_key', key());
 
   try {
-    const r = await api('POST', '/ingest/upload', fd);
+    const r = await apiWithAuth('POST', '/ingest/upload', fd);
     const d = await r.json();
     taskId = d.task_id;
     taskStatus.textContent = 'queued';
@@ -410,7 +410,7 @@ askBtn.addEventListener('click', async () => {
   addThinking();
 
   try {
-    const r = await api('POST', '/query', { question: q, top_k: 5 });
+    const r = await apiWithAuth('POST', '/query', { question: q, top_k: 5 });
     if (!r.ok) {
       const err = await r.json().catch(() => ({}));
       removeThinking();
@@ -438,15 +438,20 @@ askBtn.addEventListener('click', async () => {
 
 async function init() {
   const ok = await checkHealth();
-
-  const k = sessionStorage.getItem('api_key');
-  if (!k) {
-    const input = prompt('Enter API key (leave blank if none configured):');
-    if (input) setKey(input);
-  }
-
   if (ok) askBtn.disabled = false;
   setInterval(checkHealth, 30000);
+}
+
+async function apiWithAuth(method, path, body) {
+  let r = await api(method, path, body);
+  if (r.status === 401) {
+    const input = prompt('API key required. Enter your API key:');
+    if (input) {
+      setKey(input);
+      r = await api(method, path, body);
+    }
+  }
+  return r;
 }
 
 init();
