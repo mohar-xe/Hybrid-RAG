@@ -548,10 +548,13 @@ function toast(msg) {
 async function pollTask() {
   if (!taskId || polling) return;
   polling = true;
+  logBody.innerHTML = '<div class="log-line busy"><span class="ll-dot"></span><span class="ll-label">Queued…</span></div>';
+  logFooter.textContent = 'waiting…';
   for (let i = 0; i < 120; i++) {
     try {
       const r = await apiWithAuth('GET', `/ingest/${taskId}`);
       const d = await r.json();
+      if (d.stages) updateIngestLog(d.stages);
       if (d.status === 'completed') {
         taskStatus.textContent = `✓ ${d.chunks || 0} chunks indexed`;
         taskStatus.style.color = 'var(--green)';
@@ -568,6 +571,7 @@ async function pollTask() {
         ingestBtn.disabled = false;
         ingestBtn.textContent = 'Ingest';
         addMsg('system', `Ingestion failed: ${d.error || 'unknown error'}`);
+        logFooter.textContent = 'failed';
         polling = false;
         return;
       }
@@ -579,6 +583,14 @@ async function pollTask() {
   ingestBtn.disabled = false;
   ingestBtn.textContent = 'Ingest';
   polling = false;
+}
+
+function updateIngestLog(stages) {
+  logBody.innerHTML = stages.map(s =>
+    `<div class="log-line ${s.done ? 'done' : 'busy'}"><span class="ll-dot"></span><span class="ll-label">${s.label}</span></div>`
+  ).join('');
+  logFooter.textContent = 'running…';
+  logBody.scrollTop = logBody.scrollHeight;
 }
 
 fileInput.addEventListener('change', () => {

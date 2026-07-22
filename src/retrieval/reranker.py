@@ -234,5 +234,16 @@ def rerank(query: str, chunks: list, top_k: int | None = None) -> list:
             )
             return chunks[:top_k]
 
+    # Deduplicate by text content (same text can appear via different retrieval signals)
+    seen: set[str] = set()
+    deduped = []
+    for c in result:
+        if c.text not in seen:
+            seen.add(c.text)
+            deduped.append(c)
+    if len(deduped) < len(result):
+        LOGGER.info(f"Deduplicated {len(result)} -> {len(deduped)} unique chunks.")
+    result = deduped[:top_k]
+
     LOGGER.info(f"Reranked {len(chunks)} candidate(s) -> top {len(result)}.")
     return result

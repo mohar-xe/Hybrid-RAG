@@ -184,6 +184,7 @@ def _run_ingestion(
     version_label: str | None = None,
     supersedes: str | None = None,
 ):
+
     from ingestion.extractor import Extractor
     from ingestion.chunker import chunk_text, chunk_enrich
     from ingestion.document_cluster import (
@@ -201,12 +202,29 @@ def _run_ingestion(
 
     import uuid as _uuid
 
+    _INGEST_STAGES = [
+        "Extracting text…",
+        "Extracting metadata…",
+        "Chunking…",
+        "Storing chunks…",
+        "Extracting graph entities…",
+        "Storing graph…",
+    ]
+
+    def _set_stage(idx: int):
+        done = [{"label": _INGEST_STAGES[i], "done": True} for i in range(idx)]
+        current = {"label": _INGEST_STAGES[idx], "done": False}
+        remaining = [{"label": s, "done": False} for s in _INGEST_STAGES[idx + 1 :]]
+        _tasks[task_id]["stages"] = done + [current] + remaining
+
     _tasks[task_id]["status"] = "processing"
+    _tasks[task_id]["stages"] = [{"label": s, "done": False} for s in _INGEST_STAGES]
     try:
+        _set_stage(0)
         ext = Extractor()
         text = ext.extract_pdf(file_path)
 
-        # Document metadata extraction
+        _set_stage(1)
         metadata = extract_document_metadata(text, source_id=file_path)
         is_versioned = bool(version_label or supersedes)
         doc_id = str(_uuid.uuid4())
@@ -221,14 +239,19 @@ def _run_ingestion(
             version_label=version_label,
         )
 
+        _set_stage(2)
         chunks = chunk_enrich(
             chunk_text(text), source_type.upper(), file_path, doc_id=doc_id
         )
+
+        _set_stage(3)
         store_chunks(chunks)
 
+        _set_stage(4)
         triplets_list = extract_entities_batch(
             [c.text for c in chunks], backend=extractor
         )
+        _set_stage(5)
         failed = 0
         with _GRAPH_WRITE_LOCK:
             graph_db, graph_conn = get_connection()

@@ -55,11 +55,13 @@ def _ollama_client() -> OllamaClient:
 
 
 def _api_generate(messages: list[dict]) -> str:
+    kwargs = {"temperature": 0.1}
+    if settings.generator.max_tokens:
+        kwargs["max_tokens"] = settings.generator.max_tokens
     return _api_client().chat(
         messages=messages,
         model=settings.generator.model,
-        temperature=0.1,
-        max_tokens=settings.generator.max_tokens,
+        **kwargs,
     )
 
 
@@ -72,11 +74,13 @@ def _ollama_generate(messages: list[dict]) -> str:
 
 
 def _api_stream_generate(messages: list[dict]) -> Generator[str, None, None]:
+    kwargs = {"temperature": 0.1}
+    if settings.generator.max_tokens:
+        kwargs["max_tokens"] = settings.generator.max_tokens
     yield from _api_client().chat_stream(
         messages=messages,
         model=settings.generator.model,
-        temperature=0.1,
-        max_tokens=settings.generator.max_tokens,
+        **kwargs,
     )
 
 

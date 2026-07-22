@@ -26,7 +26,8 @@ class ApiClient:
             timeout=self._timeout,
         )
         response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"]
+        msg = response.json()["choices"][0]["message"]
+        return msg.get("reasoning_content", "") + msg.get("content", "")
 
     def chat_stream(self, messages: list[dict], model: str, **kwargs):
         import json
@@ -47,6 +48,8 @@ class ApiClient:
                     delta = chunk["choices"][0].get("delta", {})
                     if content := delta.get("content"):
                         yield content
+                    elif reasoning := delta.get("reasoning_content"):
+                        yield reasoning
 
     def embed(self, texts: list[str], model: str, **kwargs) -> list[list[float]]:
         import httpx

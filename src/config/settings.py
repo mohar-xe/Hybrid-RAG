@@ -141,7 +141,7 @@ class GeneratorSettings(BaseSettings):
     base_url: str
     model: str
     api_key: SecretStr
-    max_tokens: int = 1024
+    max_tokens: int = 0  # 0 = uncapped (model's max context)
     # Backend selection
     backend: Literal["api", "ollama"] = "api"
     # Fallback
