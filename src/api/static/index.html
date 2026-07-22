@@ -193,6 +193,90 @@ header h1 span { color: var(--fg1); font-weight: 400; }
 .query-row input:focus { border-color: var(--blue); }
 .query-row input::placeholder { color: var(--fg1); }
 
+/* ── Split layout: chat left, log right ── */
+.main {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+}
+.chat-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.chat {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.log-panel {
+  width: 320px;
+  border-left: 1px solid var(--bg1);
+  background: var(--bg0);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+.log-panel-header {
+  padding: 12px 16px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg1);
+  border-bottom: 1px solid var(--bg2);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.log-panel-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 0;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 11px;
+}
+.log-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 16px;
+  color: var(--fg1);
+  border-left: 3px solid transparent;
+  transition: border-color .2s, background .15s;
+}
+.log-line.busy {
+  border-left-color: var(--yellow);
+  background: rgba(215,153,33,0.06);
+}
+.log-line.done {
+  border-left-color: var(--green);
+  color: var(--fg);
+}
+.log-line .ll-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.log-line.busy .ll-dot {
+  background: var(--yellow);
+  animation: pulse 1s ease-in-out infinite;
+}
+.log-line.done .ll-dot {
+  background: var(--green);
+}
+.log-line .ll-label { flex: 1; }
+.log-line .ll-ms { color: var(--gray); font-size: 10px; }
+.log-line .ll-items { color: var(--gray); font-size: 10px; }
+.log-panel-footer {
+  padding: 8px 16px;
+  font-size: 10px;
+  color: var(--gray);
+  border-top: 1px solid var(--bg2);
+  text-align: right;
+}
+
 /* ── Collapsible sections ── */
 .collapse { margin-top: 12px; border-top: 1px solid var(--bg2); padding-top: 8px; }
 .collapse-header {
@@ -219,19 +303,6 @@ header h1 span { color: var(--fg1); font-weight: 400; }
   display: flex; gap: 12px; color: var(--fg1); font-size: 11px; margin-bottom: 4px;
 }
 .chunk-item .chunk-meta .score { color: var(--aqua); font-weight: 600; }
-
-/* ── Log output ── */
-.log-box {
-  background: var(--bg0); border: 1px solid var(--bg2); border-radius: 6px;
-  font-family: 'SF Mono', 'Fira Code', monospace; font-size: 11px;
-  padding: 8px; max-height: 200px; overflow-y: auto;
-}
-.log-box .line { padding: 1px 0; color: var(--fg1); }
-.log-box .line .ts { color: var(--gray); }
-.log-box .line.ok { color: var(--green); }
-.log-box .line.busy { color: var(--yellow); }
-.log-box .line.err { color: var(--red); }
-.log-box .line.done { color: var(--blue); }
 
 .metrics { margin-top: 8px; }
 .metrics-toggle {
@@ -301,19 +372,27 @@ header h1 span { color: var(--fg1); font-weight: 400; }
   </div>
 </header>
 
-<div class="chat" id="chat"></div>
-
-<div class="input-area">
-  <div class="upload-bar">
-    <label for="fileInput" id="fileLabel">+ Upload PDF</label>
-    <input type="file" id="fileInput" accept=".pdf">
-    <span class="file-name" id="fileName"></span>
-    <span class="task-status" id="taskStatus"></span>
-    <button class="btn sm" id="ingestBtn" disabled>Ingest</button>
+<div class="main">
+  <div class="chat-area">
+    <div class="chat" id="chat"></div>
+    <div class="input-area">
+      <div class="upload-bar">
+        <label for="fileInput" id="fileLabel">+ Upload PDF</label>
+        <input type="file" id="fileInput" accept=".pdf">
+        <span class="file-name" id="fileName"></span>
+        <span class="task-status" id="taskStatus"></span>
+        <button class="btn sm" id="ingestBtn" disabled>Ingest</button>
+      </div>
+      <div class="query-row">
+        <input type="text" id="queryInput" placeholder="Ask a question about your documents..." autocomplete="off">
+        <button class="btn primary" id="askBtn" disabled>Ask</button>
+      </div>
+    </div>
   </div>
-  <div class="query-row">
-    <input type="text" id="queryInput" placeholder="Ask a question about your documents..." autocomplete="off">
-    <button class="btn primary" id="askBtn" disabled>Ask</button>
+  <div class="log-panel">
+    <div class="log-panel-header">Pipeline</div>
+    <div class="log-panel-body" id="logBody"></div>
+    <div class="log-panel-footer" id="logFooter"></div>
   </div>
 </div>
 
@@ -327,6 +406,8 @@ let polling = false;
 
 const $ = s => document.querySelector(s);
 const chat = $('#chat');
+const logBody = $('#logBody');
+const logFooter = $('#logFooter');
 const healthDot = $('#healthDot');
 const healthText = $('#healthText');
 const fileInput = $('#fileInput');
@@ -368,6 +449,41 @@ async function api(method, path, body) {
   return r;
 }
 
+const _STAGE_ORDER = [
+  'query_understanding', 'embedding', 'hard_filter', 'doc_soft_rank',
+  'chunk_hybrid_search', 'rerank', 'graph_expansion', 'context_build', 'generate',
+];
+
+function startLog() {
+  logBody.innerHTML = _STAGE_ORDER.map(s =>
+    `<div class="log-line busy" data-stage="${s}"><span class="ll-dot"></span><span class="ll-label">${_STAGE_LABELS[s]}</span><span class="ll-ms"></span></div>`
+  ).join('');
+  logFooter.textContent = 'running…';
+  logBody.scrollTop = 0;
+}
+
+function updateLog(stages) {
+  const map = {};
+  for (const s of stages) map[s.name] = s;
+  let totalMs = 0;
+  for (const s of stages) totalMs += s.ms;
+  for (const line of logBody.children) {
+    const name = line.dataset.stage;
+    const s = map[name];
+    if (s) {
+      line.className = 'log-line done';
+      line.querySelector('.ll-ms').textContent = `${s.ms}ms`;
+      if (s.items) line.querySelector('.ll-ms').textContent += ` (${s.items})`;
+    }
+  }
+  logFooter.textContent = `${totalMs}ms total`;
+}
+
+function clearLog() {
+  logBody.innerHTML = '';
+  logFooter.textContent = '';
+}
+
 function addMsg(role, html) {
   const d = document.createElement('div');
   d.className = 'msg ' + role;
@@ -407,13 +523,6 @@ const _STAGE_LABELS = {
   context_build: 'Building context…',
   generate: 'Generating answer…',
 };
-
-function logStageBox(stages) {
-  const lines = stages.map(s =>
-    `<div class="line done"><span class="ts">${s.ms}ms</span> ${_STAGE_LABELS[s.name] || s.name} <span class="ts">(${s.items} items)</span></div>`
-  ).join('');
-  return `<div class="log-box">${lines}</div>`;
-}
 
 function chunksHTML(chunks) {
   if (!chunks || !chunks.length) return '<div class="chunk-item" style="color:var(--fg1)">No chunks retrieved.</div>';
@@ -517,17 +626,20 @@ askBtn.addEventListener('click', async () => {
   queryInput.value = '';
   addMsg('user', q);
   addThinking();
+  startLog();
 
   try {
     const r = await apiWithAuth('POST', '/query', { question: q, top_k: 5 });
+    removeThinking();
     if (!r.ok) {
       const err = await r.json().catch(() => ({}));
-      removeThinking();
       addMsg('system', `Error: ${err.detail || r.statusText}`);
+      logFooter.textContent = 'failed';
       return;
     }
     const d = await r.json();
-    removeThinking();
+
+    if (d.metrics && d.metrics.stages) updateLog(d.metrics.stages);
 
     let html = d.answer.replace(/\n/g, '<br>');
     if (d.citations && d.citations.length) {
@@ -539,10 +651,6 @@ askBtn.addEventListener('click', async () => {
       html += `<div class="ref">Faithfulness: ${(d.faithfulness * 100).toFixed(0)}%</div>`;
     }
 
-    // Pipeline log + collapsible sections
-    if (d.metrics && d.metrics.stages) {
-      html += collapsible('log-' + Date.now(), 'Pipeline Log', d.metrics.stages.length, logStageBox(d.metrics.stages));
-    }
     if (d.chunks && d.chunks.length) {
       html += collapsible('chunks-' + Date.now(), 'Retrieved Chunks', d.chunks.length, chunksHTML(d.chunks));
     }
@@ -556,6 +664,7 @@ askBtn.addEventListener('click', async () => {
   } catch (e) {
     removeThinking();
     addMsg('system', 'Request failed: ' + e.message);
+    logFooter.textContent = 'error';
   }
 });
 

@@ -434,7 +434,7 @@ async def query(req: QueryRequest):
     return QueryResponse(
         answer=answer,
         chunks=[
-            {"score": c.score, "source": c.source_id, "preview": c.text_preview}
+            {"score": c.score, "source": c.source_id, "preview": c.text[:200]}
             for c in chunks
         ],
         graph_facts=graph_facts,
