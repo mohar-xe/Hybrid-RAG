@@ -3,6 +3,8 @@
 Ingests each selected paragraph into pgvector with ``source_id = title`` and a
 **deterministic** ``chunk_id`` (``f"{title}::{i}"``), so re-running is idempotent
 (``store_chunks`` uses ``ON CONFLICT (chunk_id) DO NOTHING``) and reproducible.
+Also creates a ``document_clusters`` entry per paragraph so the new doc-level
+routing pipeline (``doc_level_soft_rank``) can score and rank paragraphs.
 Optionally also extracts the knowledge graph (needed for the ``all_three`` mode
 to contribute graph facts).
 
@@ -27,10 +29,16 @@ def ingest_corpus(
 ) -> dict[str, int]:
     """Ingest ``{title: text}`` into pgvector (and optionally the Kùzu graph).
 
+    Creates:
+      * Chunks with deterministic IDs and ``doc_id = title``.
+      * A ``document_clusters`` row per paragraph for doc-level routing.
+      * (optional) KG triplets in Kùzu.
+
     Returns counts: ``{"titles", "chunks", "graph_triplets", "graph_failed"}``.
     """
     from config.init_db import init_db
     from ingestion.chunker import chunk_text, chunk_enrich
+    from ingestion.document_cluster import create_document_cluster
     from retrieval.pgvector import store_chunks
     from constants.logger import setup_logger
 
@@ -52,13 +60,31 @@ def ingest_corpus(
         if not text:
             continue
 
-        chunks = chunk_enrich(chunk_text(text), "PDF", title)
-        # Deterministic, idempotent chunk ids (override the random uuid4).
+        # Chunk -> enrich -> store, with doc_id wired for doc-level routing.
+        chunks = chunk_enrich(chunk_text(text), "PDF", title, doc_id=title)
         for i, chunk in enumerate(chunks):
             chunk.chunk_id = f"{title}::{i}"
         store_chunks(chunks)
         n_titles += 1
         n_chunks += len(chunks)
+
+        # Create a minimal document cluster entry for doc-level routing.
+        create_document_cluster(
+            doc_id=title,
+            source_id=title,
+            source_type="hotpotqa",
+            metadata={
+                "title": title,
+                "summary": text[:500],
+                "synthetic_questions": [],
+                "doc_type": "",
+                "topic_tags": [],
+                "entities": [],
+                "content_date": None,
+                "version_info": None,
+            },
+            text=text,
+        )
 
         if with_graph:
             n_t, n_f = _ingest_graph(chunks, backend, graph_conn)
@@ -66,7 +92,10 @@ def ingest_corpus(
             n_failed += n_f
 
         if idx % progress_every == 0:
-            logger.info(f"Ingested {idx}/{len(titles)} paragraphs ({n_chunks} chunks).")
+            logger.info(
+                f"Ingested {idx}/{len(titles)} paragraphs "
+                f"({n_chunks} chunks, {n_triplets} triplets)."
+            )
 
     logger.info(
         f"Corpus ingest done: {n_titles} paragraphs, {n_chunks} chunks, "
@@ -92,10 +121,15 @@ def _ingest_graph(chunks: list, backend: str | None, conn) -> tuple[int, int]:
             n_failed += 1
             continue
         upsert_triplets(triplets, conn=conn)
-        entity_names = list({t.source.title for t in triplets} | {t.target.title for t in triplets})
+        entity_names = list(
+            {t.source.title for t in triplets} | {t.target.title for t in triplets}
+        )
         link_entities_to_chunk(
-            entity_names, str(chunk.chunk_id), text=chunk.text,
-            source_id=chunk.source_id, conn=conn,
+            entity_names,
+            str(chunk.chunk_id),
+            text=chunk.text,
+            source_id=chunk.source_id,
+            conn=conn,
         )
         n_triplets += len(triplets)
     return n_triplets, n_failed

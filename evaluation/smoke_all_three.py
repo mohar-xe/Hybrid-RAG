@@ -62,9 +62,16 @@ _DOCS = {
 _DENSE_ORDER = ["d1", "d3", "d2", "d5"]  # "semantic" ranking
 _SPARSE_ORDER = ["d2", "d1", "d4"]  # "keyword" ranking
 
+# Unique source_ids (used as doc_ids by the doc-level routing pipeline).
+_DOC_IDS = list(dict.fromkeys(source_id for _cid, (source_id, _text) in _DOCS.items()))
+
 
 def _make_chunks(order):
-    """Build real ``RetrievedChunk`` objects for a dummy ranking (high score first)."""
+    """Build real ``RetrievedChunk`` objects for a dummy ranking (high score first).
+
+    Sets ``doc_id = source_id`` so the doc-level rank signal in the RRF fusion
+    can look up each chunk's parent document.
+    """
     from retrieval.pgvector import RetrievedChunk
 
     n = len(order)
@@ -79,6 +86,7 @@ def _make_chunks(order):
                 score=float(n - rank),
                 source_type="DUMMY",
                 chunk_index=rank,
+                doc_id=source_id,
             )
         )
     return out
@@ -142,11 +150,21 @@ def main() -> int:
         _seed_graph(conn)
 
         # --- Swap the live retrievers for dummy data --------------------------
-        # search() binds vector_search/bm25_search/embedder/get_entity_context in
-        # its own module namespace, so patching there reroutes the real fusion
-        # code onto dummy inputs without a database or Ollama.
-        search_module.vector_search = lambda emb, top_k=20: _make_chunks(_DENSE_ORDER)
-        search_module.bm25_search = lambda q, top_k=20: _make_chunks(_SPARSE_ORDER)
+        # The new search() pipeline calls:
+        #   doc_level_soft_rank -> _chunk_dense_search / _chunk_lexical_search
+        #   -> rerank (if enabled) -> structural_expansion -> get_entity_context
+        # We mock the retrieval internals so the real fusion code runs on dummy
+        # inputs without a database or Ollama. structural_expansion is a no-op.
+        search_module.doc_level_soft_rank = lambda emb, query_text, **kw: [
+            (sid, 1.0) for sid in _DOC_IDS
+        ]
+        search_module._chunk_dense_search = lambda emb, doc_ids, top_k=20: _make_chunks(
+            _DENSE_ORDER
+        )
+        search_module._chunk_lexical_search = lambda q, doc_ids, top_k=20: _make_chunks(
+            _SPARSE_ORDER
+        )
+        search_module.structural_expansion = lambda chunk_ids: []
         search_module.embedder = lambda texts: [[0.0] * 8 for _ in texts]
         search_module.get_entity_context = lambda names, *a, **k: (
             real_get_entity_context(names, *a, **{**k, "conn": conn})
@@ -170,7 +188,6 @@ def main() -> int:
         print("   " + (one_hop.replace("\n", "\n   ") or "(none)"))
         print("Graph from 'Transformer' @ 2 hops (multi-hop, new behavior):")
         print("   " + (two_hop.replace("\n", "\n   ") or "(none)"))
-
         bridge = "Attention used_for Translation"
 
         # --- Run the real all-three retrieval ---------------------------------
