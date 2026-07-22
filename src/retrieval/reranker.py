@@ -140,6 +140,43 @@ def _rerank_ollama(query: str, chunks: list, top_k: int) -> list:
     return out
 
 
+def _rerank_jina(query: str, chunks: list, top_k: int) -> list:
+    """Jina AI dedicated reranker API."""
+    if not chunks:
+        return []
+    import httpx
+
+    api_key = settings.reranker.api_key.get_secret_value()
+    model = settings.reranker.api_model or "jina-reranker-v2-base-en"
+    texts = [c.text for c in chunks]
+
+    resp = httpx.post(
+        "https://api.jina.ai/v1/rerank",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={"model": model, "query": query, "documents": texts, "top_n": top_k},
+        timeout=30.0,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+
+    results = data.get("results", [])
+    scored = {}
+    for r in results:
+        idx = r["index"]
+        scored[idx] = r["relevance_score"]
+
+    out = []
+    for r in results:
+        idx = r["index"]
+        chunk = chunks[idx]
+        chunk.score = float(scored.get(idx, 0.0))
+        out.append(chunk)
+    return out
+
+
 def rerank(query: str, chunks: list, top_k: int | None = None) -> list:
     """Re-score ``chunks`` against ``query`` and return the top-k.
 
@@ -157,6 +194,7 @@ def rerank(query: str, chunks: list, top_k: int | None = None) -> list:
 
     _BACKENDS = {
         "api": _rerank_api,
+        "jina": _rerank_jina,
         "ollama": _rerank_ollama,
         "hf": _rerank_hf,
     }

@@ -229,8 +229,8 @@ class RerankerSettings(BaseSettings):
     model: str = "cross-encoder/ms-marco-TinyBERT-L-2-v2"
     top_k: int = 5
     # Backend selection
-    backend: Literal["api", "ollama", "hf"] = "api"
-    fallback_backend: Literal["api", "ollama", "hf", "none"] = "ollama"
+    backend: Literal["api", "jina", "ollama", "hf"] = "jina"
+    fallback_backend: Literal["api", "jina", "ollama", "hf", "none"] = "none"
     fallback_enabled: bool = True
     api_base_url: str = ""
     api_model: str = ""

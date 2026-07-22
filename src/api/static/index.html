@@ -193,7 +193,47 @@ header h1 span { color: var(--fg1); font-weight: 400; }
 .query-row input:focus { border-color: var(--blue); }
 .query-row input::placeholder { color: var(--fg1); }
 
-.metrics { margin-top: 12px; border-top: 1px solid var(--bg2); padding-top: 8px; }
+/* ── Collapsible sections ── */
+.collapse { margin-top: 12px; border-top: 1px solid var(--bg2); padding-top: 8px; }
+.collapse-header {
+  font-size: 12px; color: var(--fg1); cursor: pointer; user-select: none;
+  padding: 4px 0; display: flex; align-items: center; gap: 6px;
+}
+.collapse-header:hover { color: var(--blue); }
+.collapse-header .badge {
+  font-size: 10px; background: var(--bg2); padding: 1px 6px; border-radius: 8px;
+  color: var(--fg1); margin-left: auto;
+}
+.collapse-body { display: none; margin-top: 8px; max-height: 400px; overflow-y: auto; }
+.collapse-body.open { display: block; }
+.collapse-body pre {
+  background: var(--bg0); padding: 10px; border-radius: 6px;
+  font-size: 12px; overflow-x: auto; white-space: pre-wrap; word-break: break-all;
+  margin: 0;
+}
+.chunk-item {
+  background: var(--bg0); border: 1px solid var(--bg2); border-radius: 6px;
+  padding: 8px 10px; margin-bottom: 6px; font-size: 12px;
+}
+.chunk-item .chunk-meta {
+  display: flex; gap: 12px; color: var(--fg1); font-size: 11px; margin-bottom: 4px;
+}
+.chunk-item .chunk-meta .score { color: var(--aqua); font-weight: 600; }
+
+/* ── Log output ── */
+.log-box {
+  background: var(--bg0); border: 1px solid var(--bg2); border-radius: 6px;
+  font-family: 'SF Mono', 'Fira Code', monospace; font-size: 11px;
+  padding: 8px; max-height: 200px; overflow-y: auto;
+}
+.log-box .line { padding: 1px 0; color: var(--fg1); }
+.log-box .line .ts { color: var(--gray); }
+.log-box .line.ok { color: var(--green); }
+.log-box .line.busy { color: var(--yellow); }
+.log-box .line.err { color: var(--red); }
+.log-box .line.done { color: var(--blue); }
+
+.metrics { margin-top: 8px; }
 .metrics-toggle {
   font-size: 12px; color: var(--fg1); cursor: pointer; user-select: none;
   padding: 4px 0; display: inline-block;
@@ -334,6 +374,7 @@ function addMsg(role, html) {
   d.innerHTML = '<div class="bubble">' + html + '</div>';
   chat.appendChild(d);
   d.scrollIntoView({ behavior: 'smooth' });
+  return d;
 }
 
 function addThinking() {
@@ -348,6 +389,44 @@ function addThinking() {
 function removeThinking() {
   const t = $('#thinking');
   if (t) t.remove();
+}
+
+const _STAGE_COLORS = {
+  query_understanding: '#458588', embedding: '#98971a', hard_filter: '#d79921',
+  doc_soft_rank: '#d65d0e', chunk_hybrid_search: '#cc241d', rerank: '#b16286',
+  graph_expansion: '#689d6a', context_build: '#928374', generate: '#fbf1c7',
+};
+const _STAGE_LABELS = {
+  query_understanding: 'Understanding query…',
+  embedding: 'Embedding query…',
+  hard_filter: 'Hard-filtering docs…',
+  doc_soft_rank: 'Soft-ranking docs…',
+  chunk_hybrid_search: 'Hybrid chunk search…',
+  rerank: 'Reranking chunks…',
+  graph_expansion: 'Expanding graph…',
+  context_build: 'Building context…',
+  generate: 'Generating answer…',
+};
+
+function logStageBox(stages) {
+  const lines = stages.map(s =>
+    `<div class="line done"><span class="ts">${s.ms}ms</span> ${_STAGE_LABELS[s.name] || s.name} <span class="ts">(${s.items} items)</span></div>`
+  ).join('');
+  return `<div class="log-box">${lines}</div>`;
+}
+
+function chunksHTML(chunks) {
+  if (!chunks || !chunks.length) return '<div class="chunk-item" style="color:var(--fg1)">No chunks retrieved.</div>';
+  return chunks.map(c =>
+    `<div class="chunk-item"><div class="chunk-meta"><span class="score">${c.score.toFixed(4)}</span><span>${c.source}</span></div>${c.preview}</div>`
+  ).join('');
+}
+
+function collapsible(id, label, count, bodyHTML, open) {
+  return `<div class="collapse">
+    <div class="collapse-header" onclick="(function(el){var b=document.getElementById('${id}');b.classList.toggle('open');el.innerHTML=b.classList.contains('open')?'${label} ▼':'${label} ▶'})(this)">${label} ▶<span class="badge">${count}</span></div>
+    <div class="collapse-body${open ? ' open' : ''}" id="${id}">${bodyHTML}</div>
+  </div>`;
 }
 
 function toast(msg) {
@@ -459,6 +538,17 @@ askBtn.addEventListener('click', async () => {
     if (d.faithfulness != null) {
       html += `<div class="ref">Faithfulness: ${(d.faithfulness * 100).toFixed(0)}%</div>`;
     }
+
+    // Pipeline log + collapsible sections
+    if (d.metrics && d.metrics.stages) {
+      html += collapsible('log-' + Date.now(), 'Pipeline Log', d.metrics.stages.length, logStageBox(d.metrics.stages));
+    }
+    if (d.chunks && d.chunks.length) {
+      html += collapsible('chunks-' + Date.now(), 'Retrieved Chunks', d.chunks.length, chunksHTML(d.chunks));
+    }
+    if (d.graph_facts) {
+      html += collapsible('graph-' + Date.now(), 'Graph Triplets', d.graph_facts.split('\n').length, '<pre>' + d.graph_facts + '</pre>');
+    }
     if (d.metrics) {
       html += metricsToHTML(d.metrics);
     }
@@ -468,12 +558,6 @@ askBtn.addEventListener('click', async () => {
     addMsg('system', 'Request failed: ' + e.message);
   }
 });
-
-const _STAGE_COLORS = {
-  query_understanding: '#458588', embedding: '#98971a', hard_filter: '#d79921',
-  doc_soft_rank: '#d65d0e', chunk_hybrid_search: '#cc241d', rerank: '#b16286',
-  graph_expansion: '#689d6a', context_build: '#928374', generate: '#fbf1c7',
-};
 
 function metricsToHTML(m) {
   const stages = m.stages || [];

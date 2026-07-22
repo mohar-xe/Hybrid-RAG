@@ -81,6 +81,10 @@ def _rate_limit(action: str):
         x_api_key: str | None = Header(default=None),
         x_forwarded_for: str | None = Header(default=None),
     ):
+        configured = settings.api.api_key.get_secret_value()
+        if configured and x_api_key and secrets.compare_digest(x_api_key, configured):
+            return True
+
         allowed, used = check_limit(
             action,
             x_api_key=x_api_key,
@@ -170,11 +174,11 @@ class QueryRequest(BaseModel):
 
 class QueryResponse(BaseModel):
     answer: str
-    citations: list[dict]
+    citations: list[dict] = []
     faithfulness: float | None = None
     metrics: dict | None = None
-    chunks: list[dict] | None = None
-    graph_facts: str | None = None
+    chunks: list[dict] = []
+    graph_facts: str = ""
 
 
 def _run_ingestion(
@@ -440,6 +444,11 @@ async def query(req: QueryRequest):
 
     return QueryResponse(
         answer=answer,
+        chunks=[
+            {"score": c.score, "source": c.source_id, "preview": c.text_preview}
+            for c in chunks
+        ],
+        graph_facts=graph_facts,
         citations=[
             {"ref": c.ref_id, "source": c.source_id, "preview": c.text_preview}
             for c in citations
