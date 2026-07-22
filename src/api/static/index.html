@@ -437,6 +437,7 @@ askBtn.addEventListener('click', async () => {
 });
 
 async function init() {
+  sessionStorage.removeItem('api_key');
   const ok = await checkHealth();
   if (ok) askBtn.disabled = false;
   setInterval(checkHealth, 30000);
