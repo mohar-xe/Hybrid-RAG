@@ -102,17 +102,25 @@ def generate(
     """
     messages = _build_messages(query, context, closed_book=closed_book)
 
-    try:
-        gen = _api_stream_generate(messages)
-    except Exception as exc:
-        LOGGER.warning(
-            "Generator API stream failed (%s), falling back to Ollama...", exc
-        )
-        gen = _single_yield(_ollama_generate(messages))
-
     if stream:
-        return gen
+        try:
+            return _api_stream_generate(messages)
+        except Exception as exc:
+            LOGGER.warning(
+                "Generator API stream failed (%s), falling back to Ollama...", exc
+            )
+            return _single_yield(_ollama_generate(messages))
 
-    result = "".join(gen)
-    LOGGER.info("Generated %d words.", len(result.split()))
+    result, _backend = with_fallback(
+        _api_generate,
+        _ollama_generate,
+        "generator",
+        fallback_enabled=settings.generator.fallback_enabled,
+        messages=messages,
+    )
+    LOGGER.info(
+        "Generated %d words (backend=%s).",
+        len(result.split()),
+        _backend,
+    )
     return result
