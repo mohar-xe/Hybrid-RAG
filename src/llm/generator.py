@@ -59,7 +59,7 @@ def _api_generate(messages: list[dict]) -> str:
         messages=messages,
         model=settings.generator.model,
         temperature=0.1,
-        max_tokens=1024,
+        max_tokens=settings.generator.max_tokens,
     )
 
 
@@ -76,7 +76,7 @@ def _api_stream_generate(messages: list[dict]) -> Generator[str, None, None]:
         messages=messages,
         model=settings.generator.model,
         temperature=0.1,
-        max_tokens=1024,
+        max_tokens=settings.generator.max_tokens,
     )
 
 
@@ -88,37 +88,27 @@ def generate(
     query: str,
     context: str = "",
     *,
-    stream: bool = False,
+    stream: bool = True,
     closed_book: bool = False,
 ) -> str | Generator[str, None, None]:
     """Generate an answer, trying the remote API first then falling back to Ollama.
 
-    Returns the answer string (non-streaming) or a generator (streaming), with
-    the same signature as before for backward compatibility. The backend tag is
-    logged internally.
+    Returns a generator (streaming) or a string (non-streaming). The backend
+    tag is logged internally.
     """
     messages = _build_messages(query, context, closed_book=closed_book)
 
-    if stream:
-        try:
-            return _api_stream_generate(messages)
-        except Exception as exc:
-            LOGGER.warning(
-                "Generator API stream failed (%s), falling back to Ollama...", exc
-            )
-            result = _ollama_generate(messages)
-            return _single_yield(result)
+    try:
+        gen = _api_stream_generate(messages)
+    except Exception as exc:
+        LOGGER.warning(
+            "Generator API stream failed (%s), falling back to Ollama...", exc
+        )
+        gen = _single_yield(_ollama_generate(messages))
 
-    result, _backend = with_fallback(
-        _api_generate,
-        _ollama_generate,
-        "generator",
-        fallback_enabled=settings.generator.fallback_enabled,
-        messages=messages,
-    )
-    LOGGER.info(
-        "Generated %d words (backend=%s).",
-        len(result.split()),
-        _backend,
-    )
+    if stream:
+        return gen
+
+    result = "".join(gen)
+    LOGGER.info("Generated %d words.", len(result.split()))
     return result

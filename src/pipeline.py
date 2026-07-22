@@ -340,9 +340,10 @@ def ask(
 
     # Step 8: assemble + generate
     context, citations = build_context(chunks, graph_facts)
-    answer = generate(question, context)
-
-    typer.echo(f"\n{answer}\n")
+    typer.echo("")
+    for token in generate(question, context):
+        typer.echo(token, nl=False, flush=True)
+    typer.echo("\n")
 
     if verbose:
         typer.echo("\nSources:")

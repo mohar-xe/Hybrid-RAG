@@ -8,6 +8,7 @@ into reading arbitrary server files. If ``API__KEY`` is empty the app runs in
 a deployment to an untrusted network.
 """
 
+import json
 import secrets
 import threading
 import time
@@ -172,6 +173,8 @@ class QueryResponse(BaseModel):
     citations: list[dict]
     faithfulness: float | None = None
     metrics: dict | None = None
+    chunks: list[dict] | None = None
+    graph_facts: str | None = None
 
 
 def _run_ingestion(
@@ -423,7 +426,7 @@ async def query(req: QueryRequest):
         )
 
     t.start("generate")
-    answer = generate(req.question, context)
+    answer = generate(req.question, context, stream=False)
     t.end()
 
     faithfulness = None

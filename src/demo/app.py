@@ -242,7 +242,7 @@ def query_rag(
                 graph_facts = ""
 
     context, citations = build_context(chunks, graph_facts, max_tokens=1500)
-    answer = generate(question, context)
+    answer = generate(question, context, stream=False)
 
     emb_backend = settings.embedding.backend
     rerank_backend = settings.reranker.backend

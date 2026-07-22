@@ -141,6 +141,7 @@ class GeneratorSettings(BaseSettings):
     base_url: str
     model: str
     api_key: SecretStr
+    max_tokens: int = 1024
     # Backend selection
     backend: Literal["api", "ollama"] = "api"
     # Fallback
@@ -225,7 +226,7 @@ class NERSettings(BaseSettings):
 class RerankerSettings(BaseSettings):
     """Cross-encoder reranking configuration with API-first + fallback."""
 
-    model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    model: str = "cross-encoder/ms-marco-TinyBERT-L-2-v2"
     top_k: int = 5
     # Backend selection
     backend: Literal["api", "ollama", "hf"] = "api"

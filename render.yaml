@@ -19,9 +19,9 @@ services:
           name: hybrid-rag-db
           property: connectionString
       - key: GENERATOR__BASE_URL
-        sync: false
+        value: "https://api.groq.com/openai/v1"
       - key: GENERATOR__MODEL
-        sync: false
+        value: "openai/gpt-oss-20b"
       - key: GENERATOR__API_KEY
         sync: false
       - key: NER__BASE_URL
@@ -41,9 +41,9 @@ services:
       - key: RERANKER__BACKEND
         value: "api"
       - key: RERANKER__API_BASE_URL
-        sync: false
+        value: "https://api.mistral.ai/v1"
       - key: RERANKER__API_MODEL
-        value: "mistral-large-latest"
+        value: "cross-encoder/ms-marco-TinyBERT-L-2-v2"
       - key: RERANKER__API_KEY
         sync: false
       # ------------------------------------------------------------------
