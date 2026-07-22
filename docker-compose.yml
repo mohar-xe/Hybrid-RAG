@@ -1,0 +1,78 @@
+services:
+
+  db:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_DB: hybrid_rag
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DATABASE__PASSWORD:-postgres}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # --- Database ---
+      DATABASE__HOST: db
+      DATABASE__PORT: 5432
+      DATABASE__DB_NAME: hybrid_rag
+      DATABASE__USER: postgres
+      DATABASE__PASSWORD: ${DATABASE__PASSWORD:-postgres}
+
+      # --- Generator (remote API, REQUIRED) ---
+      GENERATOR__BASE_URL: ${GENERATOR__BASE_URL:-https://openrouter.ai/api/v1}
+      GENERATOR__MODEL: ${GENERATOR__MODEL:-google/gemini-3.6-flash}
+      GENERATOR__API_KEY: ${GENERATOR__API_KEY:?Set GENERATOR__API_KEY in .env}
+      GENERATOR__FALLBACK_ENABLED: "false"
+
+      # --- Embeddings ---
+      EMBEDDING__BACKEND: ${EMBEDDING__BACKEND:-api}
+      EMBEDDING__API_BASE_URL: ${EMBEDDING__API_BASE_URL:-https://api.mistral.ai/v1}
+      EMBEDDING__API_MODEL: ${EMBEDDING__API_MODEL:-mistral-embed}
+      EMBEDDING__API_KEY: ${EMBEDDING__API_KEY:-}
+      EMBEDDING__FALLBACK_ENABLED: "false"
+
+      # --- NER/Entity extraction (Gemini API for metadata + triplets) ---
+      NER__BASE_URL: ${NER__BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}
+      NER__MODEL: ${NER__MODEL:-gemini-3.6-flash}
+      NER__API_KEY: ${NER__API_KEY:?Set NER__API_KEY in .env}
+      NER__FALLBACK_ENABLED: "false"
+
+      # --- Metadata extraction (Gemini, no spaCy fallback in Docker) ---
+      METADATA__BACKEND: api
+      METADATA__FALLBACK_ENABLED: "false"
+
+      # --- Reranker ---
+      RERANKER__BACKEND: ${RERANKER__BACKEND:-api}
+      RERANKER__API_BASE_URL: ${RERANKER__API_BASE_URL:-https://api.mistral.ai/v1}
+      RERANKER__API_MODEL: ${RERANKER__API_MODEL:-mistral-large-latest}
+      RERANKER__API_KEY: ${RERANKER__API_KEY:-}
+      RERANKER__FALLBACK_ENABLED: "false"
+
+      # --- Graph store ---
+      GRAPH__DB_PATH: /app/src/data/kuzu_db
+
+      # --- API surface ---
+      API__API_KEY: ${API__API_KEY:-}
+      API__INGEST_DIR: /ingest
+
+    volumes:
+      - kuzu_data:/app/src/data
+      - ${INGEST_DIR:-./data}:/ingest:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  kuzu_data:

@@ -4,7 +4,7 @@ Guidance for AI coding agents working in this repository. Read this before makin
 
 ## What this project is
 
-A hybrid retrieval-augmented generation system that combines **vector search (pgvector)**
+A hybrid retrieval-augmented generation system that combines **document-level clustering**
 with **knowledge-graph traversal (KùzuDB)** for question answering. Python 3.12+, managed
 with `uv`.
 
@@ -14,22 +14,11 @@ FastAPI app as "planned" even though they are implemented. **Treat `src/` as the
 truth for what exists**, not the README. Do not assume a planned feature exists — verify in
 `src/` first.
 
-- **Implemented:** ingestion (PDF/YouTube/audio extraction → normalize → **recursive
-  token-approx chunking** → keyphrase → embed), pgvector storage + schema init,
-  config/logging/exception infrastructure, Ollama embeddings, LLM entity/triplet extraction
-  (local + remote backends), Kùzu graph store, near-duplicate node merge, **coarse→fine
-  cluster-routed dense retrieval**, K-Means/medoid clustering via an explicit `reindex` command,
-  **cross-encoder reranking**, Kùzu graph-context lookup, heuristic query router, context
-  assembly + citations, OpenAI-compatible generation, a FastAPI app (`/ingest` async +
-  status, `/query`, `/health`), and a **Gradio demo UI** (`src/demo/app.py`) that exposes
-  retrieval internals for technical demos.
-- **Planned / scaffolded (config may exist but logic is not wired yet):** NLI self-verification
-  (`VerifierSettings` exists; `/query` returns `faithfulness: None`), retrieval quality scoring,
-  HyDE, RAPTOR summaries, graph community summaries, streaming `/query` responses (the `stream`
-  flag is accepted but ignored), real-time graph visualization, and the evaluation suite.
-- **Removed (do not reintroduce without discussion):** the old semantic/hierarchical chunker
-  (paragraph-embed → adjacency-cluster → spaCy entity-aware split) and flat vector/BM25
-  retrieval — both replaced by the staged pipeline below.
+**Document-level clustering (8-stage retrieval funnel) has replaced the old K-Means/medoid
+path.** The old `cluster_routed_search`, `vector_search`, `bm25_search`, `hybrid_search`
+functions are kept for backward compatibility (eval harness uses them), but `ask`/`/query`
+now use the new pipeline. `retrieval/cluster.py`, the `reindex` CLI command, and medoid DDL
+creation in `init_db.py` have been removed.
 
 ## Setup
 
@@ -54,7 +43,7 @@ is public, and the app itself ignores `HF_TOKEN` — only `setup.sh` reads it). 
 committed to the repo; it must be pulled.
 
 External services this project talks to (must be running for end-to-end use):
-- **PostgreSQL with the `pgvector` extension** (chunk storage + HNSW/GIN indexes).
+- **PostgreSQL with the `pgvector` extension** (chunk storage + document clusters + HNSW/GIN indexes).
 - **Ollama** at `http://localhost:11434` for embeddings (`nomic-embed-text`) and, when the
   `local` extraction backend is selected, KG extraction via the fine-tuned `hgr-triplet:q4`
   model (produced by the sibling `finetuning_qwen3.5` project; `model/` holds the GGUF +
@@ -70,33 +59,28 @@ That means code runs with **`src/` as the import root**. Run the CLI from inside
 
 ```bash
 cd src
-uv run python pipeline.py ingest <path> --type pdf|youtube|audio [--extractor local|deepseek]
-uv run python pipeline.py reindex                # cluster chunks + mark medoids (run after ingest)
+uv run python pipeline.py ingest <path> --type pdf [--extractor local|deepseek] [--version-label v2] [--supersedes <doc_id>]
 uv run python pipeline.py ask "<question>" --verbose
-uv run python pipeline.py merge-graph            # dry run: lists candidates
-uv run python pipeline.py merge-graph --apply    # actually merges
-uv run python pipeline.py merge-graph --threshold 0.95   # override similarity cutoff
+uv run python pipeline.py merge-graph --apply   # deduplicate graph entities
 ```
 
-Typical end-to-end order: **`ingest` → `reindex` → `ask`** (and `merge-graph --apply` any time
-after ingest to deduplicate graph entities). `reindex` is an explicit indexing step like
-`merge-graph`: it (re)computes `cluster_id`/`is_medoid` over all stored chunks. Until it runs,
-retrieval still works — it falls back to flat global ANN (see "Retrieval pipeline").
+Typical end-to-end order: **`ingest` (with version flags) → `ask` → `merge-graph`** (any time after ingest).
 
-`ingest` has **two independent phases**, separately toggleable:
-- **store** (`--store`/`--no-store`): extract → chunk → embed → pgvector. This is the slow part
-  (CPU embedding).
+`ingest` has **three independent phases**, separately toggleable:
+- **metadata** (always runs with store): Gemini/spaCy doc-level extraction → `document_clusters` + `document_questions`.
+- **store** (`--store`/`--no-store`): chunk → embed → pgvector. The slow part (CPU embedding).
 - **graph** (`--graph`/`--no-graph`): triplet extraction → Kùzu.
 
-Because embedding is expensive, a transient extraction failure (e.g. a bad/empty DeepSeek
-response) should **not** force a re-embed. Re-run just the graph phase against already-stored
-chunks: `ingest <path> --no-store --graph` (it loads chunks via
-`pgvector.get_chunks_by_source`). The graph loop is also **per-chunk resilient** — one failed
-extraction is logged and skipped, not fatal, and `_parse_json` treats an empty response as zero
-triplets.
+Re-run just the graph phase against already-stored chunks: `ingest <path> --no-store --graph`.
+The graph loop is **per-chunk resilient** — one failed extraction is logged and skipped, not
+fatal.
+
+Document versioning: `--version-label "v3" --supersedes <doc_id>` sets up a version chain.
+The detection chain (CLI → Gemini → spaCy → filename heuristic) resolves `version_info`;
+`--version-label` overrides all.
 
 - The **root `main.py` is a placeholder stub** — the real entry point is `src/pipeline.py`
-  (a Typer app with `ingest`, `ask`, `reindex`, `merge-graph` commands).
+  (a Typer app with `ingest`, `ask`, `merge-graph` commands; `reindex` has been removed).
 - `merge-graph` is destructive only with `--apply`; default is a dry run. Preserve that
   dry-run-by-default behavior. `--threshold/-s` overrides
   `GRAPH__MERGE_SIMILARITY_THRESHOLD` (default `0.90`) for a single run.
@@ -116,26 +100,30 @@ uv run python demo/app.py                # http://localhost:7860
 ```
 
 The Gradio demo is designed for **interview/portfolio use** — it shows every stage of the
-retrieval pipeline (coarse→fine routing, pre/post-rerank candidates, final chunks, graph facts)
-with toggleable features (reranking, knowledge graph). Use it to demonstrate system design
-decisions to technical audiences.
+8-stage retrieval funnel (hard filter → doc soft rank → chunk hybrid → RRF fusion → rerank →
+graph expansion → facts → generate) with toggleable features (reranking, knowledge graph,
+structural expansion).
 
 ## Architecture / layout (`src/`)
 
 ```
 config/      Pydantic settings (settings.py) + DB schema init/migrations (init_db.py)
 constants/   logger.py (rotating file + console) + exceptions.py (typed hierarchy)
-ingestion/   extractor, normalize, chunker (recursive splitter), chunk_schema  [implemented]
-embeddings/  embedder.py — nomic-embed-text via Ollama, 256-dim (Matryoshka)
+ingestion/   extractor (PDF-only), normalize, chunker, chunk_schema, document_cluster (Gemini metadata)
+embeddings/  embedder.py — nomic-embed-text via Ollama / API / sentence-transformers, 256-dim
 graph/       entity_extraction.py, schema.py, merge.py    [implemented]
-retrieval/   pgvector.py (cluster-routed dense search), cluster.py (K-Means/medoids),
-             reranker.py (cross-encoder), kuzu_store.py   [implemented]
-context/     builder.py — context assembly + citations    [implemented]
-llm/         generator.py — OpenAI-compatible generation   [implemented]
-reasoning/   router.py — heuristic query routing [implemented]; verifier [planned]
-api/         app.py — FastAPI surface (/ingest, /query, /health) [implemented core]
-demo/        app.py — Gradio UI for interactive demos with retrieval internals [implemented]
-pipeline.py  Typer CLI (ingest, ask, reindex, merge-graph) — real entry point
+retrieval/   pgvector.py (8-stage funnel: hard_filter_docs, doc_level_soft_rank, document_routed_search),
+             reranker.py (cross-encoder), kuzu_store.py (structural_expansion, get_entity_context)
+             cluster.py [REMOVED — replaced by document-level clustering]
+reasoning/   router.py (complexity), query_interpreter.py (semantic_query + filters)
+context/     builder.py — context assembly + citations
+llm/         generator.py — OpenAI-compatible generation
+verification/ verifier.py — NLI faithfulness scoring [planned — settings exist]
+api/         app.py — FastAPI surface (/ingest, /query, /health)
+demo/        app.py — Gradio UI for interactive demos with retrieval internals
+pipeline.py  Typer CLI (ingest, ask, merge-graph) — real entry point
+cache.py     LRU cache with 3 shared instances (embedding, metadata, query)
+models/      client.py, fallback.py, rate_limiter.py — shared infrastructure
 ```
 
 ## Chunking & embedding (ingestion)
@@ -145,156 +133,154 @@ separator priority list `["\n\n", "\n", ". ", " "]`, descending to the next sepa
 piece still over budget and hard-splitting on characters as a last resort (`_atomic_splits`),
 then greedily re-packs pieces with a sliding-window overlap (`_merge_splits`). Sizes are
 **character-approximated tokens** (`CHARS_PER_TOKEN = 4`): `CHUNK_CHARS = 1200` (~300 tokens),
-`OVERLAP_CHARS = 200` (~50 tokens). This bounds every chunk *before* embedding, which is the
-whole point — the previous paragraph-embed-then-cluster design could feed 25k-token blobs to
-Ollama and 400. There is **no tokenizer dependency** and **no spaCy/clustering** in chunking
-anymore.
+`OVERLAP_CHARS = 200` (~50 tokens).
+
+`chunk_enrich` now accepts a `doc_id: str | None` kwarg to link chunks to their parent document.
 
 `embeddings/embedder.py` (`nomic-embed-text`, 2048-token context):
 - Each input is capped to `MAX_INPUT_CHARS = 8000` client-side and `truncate=True` is passed to
-  Ollama — a defence-in-depth against over-long inputs (a single over-long input, or a *batch*
-  of them, otherwise 400s).
-- `BATCH_SIZE = 16`. Ollama CPU embedding shows **no batch speedup** (~constant s/input) and a
-  very large batch becomes one long request that monopolizes the runner and looks hung. Don't
-  raise this without measuring.
-- Output is truncated to 256 dims (Matryoshka) and the chunker L2-normalizes stored vectors.
-- `normalize.remove_control_chars` (and a defensive strip in `chunk_text`) removes NUL/control
-  bytes — PostgreSQL `text` rejects NUL, which PDF extraction frequently injects.
+  Ollama — a defence-in-depth against over-long inputs.
+- `BATCH_SIZE = 16` (Ollama), `128` (API/sentence-transformers).
+- Output is truncated to 256 dims (Matryoshka).
+- `normalize.remove_control_chars` removes NUL/control bytes that PostgreSQL `text` rejects.
 
-## Retrieval pipeline (coarse→fine + rerank)
+## Retrieval pipeline (8-stage funnel)
 
-Flat vector/BM25 retrieval is **gone**. `ask`/`/query` now run:
+The old K-Means/medoid cluster-routed retrieval is **replaced** by document-level clustering.
+`ask`/`/query` run this funnel:
 
-1. Embed the query (`embedder`).
-2. `retrieval.pgvector.cluster_routed_search(emb)`:
-   - **Coarse**: ANN over medoids only (`WHERE is_medoid`) → top 10.
-   - **Gate**: if best medoid similarity < `0.35` *or there are no medoids yet* (i.e. `reindex`
-     hasn't run), fall back to flat global ANN.
-   - **Select** the top 5 distinct clusters by medoid similarity.
-   - **Fine**: cluster-filtered ANN (`cluster_id = ANY(top5)`) → top 15.
-   - **Global fallback**: a parallel unfiltered ANN → top 5, merged + de-duplicated with the
-     fine results (keep higher score). Yields up to ~20 candidates.
-3. `retrieval.reranker.rerank(query, candidates)` (cross-encoder
-   `cross-encoder/ms-marco-MiniLM-L-6-v2`, lazy-loaded) → final top-k (`RERANKER__TOP_K`, default
-   5). **Rerank always runs now** (Stage 4 is unconditional), not gated on the router.
-4. Optional Kùzu graph facts (gated on the router's `use_graph`), then context build + generate.
+1. **QUERY UNDERSTANDING** (`reasoning/query_interpreter.py`): Gemini Flash-Lite or heuristic →
+   `semantic_query` + `filters` (doc_type, is_latest, date_after, entities).
+2. **HARD FILTER** (`retrieval/pgvector.hard_filter_docs`): SQL WHERE over `document_clusters`
+   (doc_type, supersedes chain, content_date). 4-stage safety valve drops filters one at a time
+   if results are empty.
+3. **DOC-LEVEL SOFT RANK** (`retrieval/pgvector.doc_level_soft_rank`): ANN over summary
+   embeddings + question embeddings (max per doc) + entity/topic overlap boost → RRF fusion →
+   top 25 docs.
+4. **CHUNK-LEVEL HYBRID SEARCH** (`document_routed_search`): Dense ANN + lexical (tsvector)
+   restricted to the top 25 docs → RRF fusion of (doc-level rank + dense rank + lexical rank).
+5. **CROSS-ENCODER RERANK**: `cross-encoder/ms-marco-MiniLM-L-6-v2` → top-k (default 5).
+6. **STRUCTURAL EXPANSION** (`retrieval/kuzu_store.structural_expansion`): Small-to-big graph
+   traversal from reranked chunks: chunk → entities → relations → sibling chunks.
+7. **GRAPH FACTS** (`get_entity_context`): Multi-hop BFS entity context for the query.
+8. **ASSEMBLE + GENERATE**: Title/summary + expanded chunks + graph facts → LLM.
 
-Clustering (`retrieval/cluster.py`, invoked by `reindex`): spherical K-Means over the
-L2-normalized 256-d chunk embeddings with `K = max(3, round(sqrt(n)))`; the **medoid** of each
-cluster is the actual chunk with max cosine to the centroid. `cluster_id`/`is_medoid` are
-persisted on the `chunks` table (`init_db` adds them via idempotent `ALTER ... ADD COLUMN IF NOT
-EXISTS`, plus a partial medoid index and a `cluster_id` index). `reasoning/router.py` still
-classifies complexity and provides `use_graph`, but its `use_bm25`/`top_k`/`use_reranker` fields
-no longer drive retrieval.
+The old `cluster_routed_search`, `vector_search`, `bm25_search`, `hybrid_search` functions are
+still in `pgvector.py` for backward compat (eval harness), but are not called by the main pipeline.
 
 ## Graph store (Kùzu)
 
 `retrieval/kuzu_store.py` defines four tables: `Entity` (name PK, entity_type), `Chunk`
 (chunk_id PK, text, source_id), `RELATES_TO` (Entity→Entity, relation_type, weight), and
-`MENTIONED_IN` (Entity→Chunk). Notes for anyone touching this:
+`MENTIONED_IN` (Entity→Chunk).
+
+Key notes:
 - `upsert_triplets` MERGEs entities and their `RELATES_TO` edge.
-- `link_entities_to_chunk(entity_names, chunk_id, text, source_id)` **MERGEs the `Chunk` node
-  itself** before creating `MENTIONED_IN` edges — nothing else inserts `Chunk` nodes, so if you
-  drop that MERGE the edges silently never form (the entity→chunk `MATCH` finds no chunk). Pass
-  `text`/`source_id` so the node is populated on creation.
-- `get_entity_context` does a **multi-hop** BFS over `RELATES_TO`: it follows up to
-  `GRAPH__MAX_HOPS` (default 2) edges out from each seed entity, **bidirectionally**, keeping
-  only relations with weight `> GRAPH__MIN_RELATION_WEIGHT`. This is what lets the graph answer
-  "bridge" questions — seed `A` → `A rel B` (hop 1) → `B rel C` (hop 2) — that a single hop can
-  never reach. Fan-out is capped per node per hop (`GRAPH__PER_HOP_NEIGHBORS`) and the total
-  facts are capped (`GRAPH__MAX_FACTS`); facts come back closest-hop-first, de-duplicated.
-  `hops=1` reproduces the old single-hop behavior (now also bidirectional). `_one_hop_neighbors`
-  is the private per-hop expansion helper.
-- `get_connection()` returns `(db, conn)`. Every graph function
-  (`init_graph_schema`, `upsert_triplets`, `link_entities_to_chunk`, `get_entity_context`)
-  takes an optional keyword-only `conn=` and opens its own only when none is passed. Ingestion
-  (`pipeline.ingest` and the API's `_run_ingestion`) opens **one** connection up front and
-  threads it through every per-chunk call instead of reopening the DB in the loop — follow this
-  pattern for any multi-statement graph work, and keep the `db` handle alive in a local (e.g.
-  `graph_db, graph_conn = get_connection()`) so the `Database` isn't GC'd while the connection
-  is in use.
+- `link_entities_to_chunk` **MERGEs the `Chunk` node itself** before creating `MENTIONED_IN`
+  edges — if you drop that MERGE the edges silently never form.
+- `get_entity_context` does **multi-hop** BFS over `RELATES_TO`, bidirectionally, up to
+  `GRAPH__MAX_HOPS` (default 2), with `GRAPH__MIN_RELATION_WEIGHT` filtering,
+  `GRAPH__PER_HOP_NEIGHBORS` fan-out cap, and `GRAPH__MAX_FACTS` total cap.
+- `structural_expansion(chunk_ids)` implements small-to-big: seed chunks → entities → related
+  entities → sibling chunks. This expands the *chunk pool* rather than adding peripheral facts.
+- `get_connection()` returns `(db, conn)`. Every graph function takes an optional keyword-only
+  `conn=` and opens its own only when none is passed. Ingestion opens one connection up front
+  and threads it through every per-chunk call — follow this pattern.
 
 ## Entity-extraction backends
 
 KG triplet extraction has **two interchangeable backends**, in
 `src/graph/entity_extraction.py`:
 
-- **`deepseek` (default)** — `extract_entities_api`: a remote OpenAI-compatible endpoint
-  (`POST {NER__BASE_URL}/chat/completions`), defaulting to DeepSeek V4 Flash. Configured by
-  `NERSettings` (`NER__*` env keys); requires the `NER__API_KEY` secret and raises
-  `ConfigurationError` if it is missing.
-- **`local`** — `extract_entities_local`: the Ollama fine-tuned `hgr-triplet:q4` model via
-  `/api/chat`. Configured by `ExtractionSettings` (`EXTRACTION__*` env keys).
+- **`deepseek` (default)** — remote OpenAI-compatible endpoint.
+- **`local`** — Ollama fine-tuned `hgr-triplet:q4`.
 
 `extract_entities(text, backend=...)` dispatches between them; `backend=None` falls back to
-`EXTRACTION__BACKEND` (default `deepseek`). Select per run with the CLI `--extractor/-e`
-(`local|deepseek`) or the `POST /ingest?extractor=` query param. `extract_entities_llm`
-stays as a backward-compatible alias for the local path. Both backends share one system
-prompt (`_build_system_prompt`), JSON parsing (`_parse_json` — returns `[]` for an empty
-response instead of raising), and an **idempotent schema check** (`validate_triplets` —
-validates raw dicts against the `Triplet` schema, drops invalid ones, and passes through items
-that are already validated `Triplet` instances). Keep that shared path intact, and register any
-third backend in `_BACKENDS`.
+`EXTRACTION__BACKEND` (default `deepseek`). Select per run with `--extractor/-e` or
+`/ingest?extractor=`. Both backends share one system prompt, JSON parsing (`_parse_json` —
+returns `[]` for empty responses), and an idempotent schema check. A third backend goes in the
+`_BACKENDS` dict.
 
-Concurrency & thinking:
-- `extract_entities_batch(texts, backend, max_workers)` runs extraction **concurrently**
-  (`ThreadPoolExecutor`, I/O-bound calls), order-preserved, returning `None` for any text that
-  errored (the caller counts/skips it). Concurrency defaults to `NER__CONCURRENCY` /
-  `EXTRACTION__CONCURRENCY` (both 10). The ingest graph phase calls this in batches and writes
-  results to Kùzu **serially** (a Kùzu connection is not thread-safe).
-- `NER__DISABLE_THINKING` (default `true`) sends `{"thinking": {"type": "disabled"}}` to the
-  DeepSeek API. DeepSeek's hybrid models default to reasoning, which burns the token budget and
-  often leaves `content` empty — with thinking on, extraction yielded ~2 triplets across 145
-  chunks; with it off, ~1000. Leave this on unless a backend rejects the field.
+Concurrency: `extract_entities_batch` runs I/O-bound calls via `ThreadPoolExecutor`
+(order-preserved), default concurrency 10. The ingest graph phase writes results to Kùzu
+serially (Kùzu connection is not thread-safe; the API uses `_GRAPH_WRITE_LOCK`).
+
+`NER__DISABLE_THINKING` (default `true`) disables DeepSeek's reasoning — critical for
+structured extraction. Leave this on unless a backend rejects the field.
+
+## Document-level clustering (metadata extraction)
+
+`ingestion/document_cluster.py` replaces the old K-Means/medoid approach:
+
+- `extract_document_metadata(text, source_id)`: Gemini 3.6 Flash → JSON with title, summary,
+  synthetic_questions, doc_type, topic_tags, entities, content_date, version_info. Falls back
+  to spaCy heuristics. Documents >1M chars skip Gemini entirely. On total failure returns
+  minimal dict (data-quality gradient).
+- `create_document_cluster(doc_id, source_id, source_type, metadata, text, ...)`: Embeds
+  summary + questions, writes `document_clusters` + `document_questions` rows. Accepts
+  `supersedes_doc_id`, `is_versioned`, `version_label` kwargs for version chains.
+
+Version detection chain (first non-None wins): CLI `--version-label` → Gemini `version_info`
+→ spaCy regex → filename heuristic. The `NOT EXISTS` query pattern identifies the chain head
+for `is_latest` semantics.
+
+## Caching
+
+`src/cache.py` defines an LRU cache with three pre-instantiated shared instances:
+- `embedding_cache`: single-string embedding results (keyed by MD5 of text).
+- `metadata_cache`: document metadata (keyed by MD5 of first 500 chars + source_id).
+- `query_cache`: query interpretation results (keyed by MD5 of normalized question).
+
+Integrated in `embeddings/embedder.py`, `ingestion/document_cluster.py`,
+`reasoning/query_interpreter.py`.
+
+## Docker deployment
+
+API-only deployment. No local models (sentence-transformers, spaCy, Ollama). All defaults
+use remote APIs. See `Dockerfile`, `docker-compose.yml`, `.dockerignore`.
 
 ## Conventions (follow these)
 
 - **Configuration:** all settings go through `config/settings.py` (Pydantic `BaseSettings`).
   The root `.env` uses **nested `GROUP__FIELD` keys** with a double-underscore delimiter
-  (e.g. `DATABASE__PASSWORD`, `GENERATOR__API_KEY`, `EXTRACTION__BACKEND`, `NER__API_KEY`).
-  Secrets use `SecretStr`. Unknown keys are ignored (`extra="ignore"`). Get config via
-  `get_settings()` — don't read `os.environ` directly. `ExtractionSettings` and `NERSettings`
-  are also independently instantiable (used directly in `entity_extraction.py`).
-- **Postgres connections:** build the libpq string via `settings.database.conninfo` (a
-  property on `DatabaseSettings`) and pass it to `psycopg.connect(...)`. Don't hand-assemble
-  `host=... port=...` strings at call sites — `pgvector.py`, `init_db.py`, and `api/app.py`
-  all go through `conninfo`.
-- **Graph tuning:** `GraphSettings` (`GRAPH__*`) holds `db_path`,
-  `merge_similarity_threshold` (0.90 — the cosine cutoff for `merge-graph` candidates),
-  `min_relation_weight` (0.50 — relations at/below this are treated as low-confidence), and the
-  multi-hop retrieval knobs `max_hops` (2), `max_facts` (30 — total fact cap), and
-  `per_hop_neighbors` (10 — per-node fan-out per hop). Route graph behavior through these rather
-  than hard-coding constants.
+  (e.g. `DATABASE__PASSWORD`, `GENERATOR__API_KEY`, `METADATA__BASE_URL`). Secrets use
+  `SecretStr`. Unknown keys are ignored (`extra="ignore"`). Get config via `get_settings()`.
+  `ExtractionSettings`, `NERSettings`, `MetadataSettings`, `QuerySettings`,
+  `EmbeddingSettings` are also independently instantiable.
+- **Postgres connections:** build the libpq string via `settings.database.conninfo`.
+  Don't hand-assemble `host=... port=...` strings.
+- **Graph tuning:** `GraphSettings` (`GRAPH__*`) holds `db_path`, `merge_similarity_threshold`,
+  `min_relation_weight`, `max_hops`, `max_facts`, `per_hop_neighbors`. Route graph behavior
+  through these rather than hard-coding constants.
 - **Logging:** obtain loggers with `setup_logger(__name__)` from `constants.logger`. Logs
   go to `logs/app.log` (rotating, 5 MB × 3) plus stdout. Don't use bare `print` for
   diagnostics in library code (the CLI uses `typer.echo` for user-facing output).
 - **Errors:** raise the typed exceptions in `constants/exceptions.py` (e.g.
   `ConfigurationError`, `TextExtractionError`, `GraphError`) rather than bare `Exception`.
-  Every project exception now derives from a single `BaseError` root (including the
-  ingestion/embedding/database/graph errors), so a broad `except BaseError` catches the whole
-  family while specific subclasses stay targetable. Keep new exceptions under `BaseError`.
-- **Imports:** keep the top-level style (`from graph.merge import ...`), consistent with the
-  rest of the package and the editable install (`src/` is the package root).
+  Every project exception derives from a single `BaseError` root.
+- **Imports:** keep the top-level style (`from graph.merge import ...`), consistent with
+  the rest of the package and the editable install (`src/` is the package root).
 - Heavy/optional imports inside CLI commands are imported lazily (inside the function) on
   purpose — keep that pattern so `--help` stays fast and optional paths don't force imports.
+- **Filters:** `doc_type` and `is_latest` get hard SQL WHERE. Entity/topic overlap is a soft
+  RRF boost, not a hard gate — avoiding false negatives from inexact naming.
+- **Safety valve:** `hard_filter_docs` drops filters one at a time when results are empty.
+  A parser mistake should never produce "no results found."
 
 ## Security notes
 
 - Never commit a populated `.env` (it is gitignored). Secrets belong in `.env` only.
-- `src/api/app.py` is a **local-first FastAPI app with no authentication**. It exposes
-  `POST /ingest` (fire-and-forget background task; poll `GET /ingest/{task_id}`),
-  `POST /query`, and `GET /health`. Ingestion runs arbitrary file paths from the request and
-  there is no auth layer — do not expose it to a public network without adding authentication
-  and input validation first. Flag this if asked to deploy it.
+- `src/api/app.py` is a **local-first FastAPI app with optional API key auth**. Configure
+  `API__KEY` to gate endpoints; without it the app logs a loud warning at startup. Ingestion
+  runs arbitrary file paths gated under `API__INGEST_DIR` — do not expose to a public network
+  without authentication and input validation.
 
 ## Verification
 
 There is **no test suite or linter configured** yet. After changes:
 - Confirm the module imports cleanly from `src/` (e.g. `cd src && uv run python -c "import pipeline"`).
-  Note that several modules (`api/app.py`, `retrieval/pgvector.py`, `llm/generator.py`,
-  `config/init_db.py`) call `get_settings()` at **import time**, so importing them requires a
-  populated `.env` (at minimum the `DATABASE__*` and `GENERATOR__*` required fields) — otherwise
-  the import fails with a Pydantic `ValidationError`, not a code error.
+  Several modules call `get_settings()` at **import time**, so importing requires a populated
+  `.env` (at minimum the `DATABASE__*` and `GENERATOR__*` required fields).
 - For ingestion/retrieval changes, a manual `ingest` then `ask` against a sample file in
   `data/` is the realistic smoke test (requires Postgres + Ollama running).
 - If you add tests, place them under a top-level `tests/` and prefer `pytest`.

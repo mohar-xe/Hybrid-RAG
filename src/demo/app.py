@@ -4,9 +4,14 @@ import gradio as gr
 from config.settings import get_settings
 from config.init_db import init_db
 from embeddings.embedder import embedder
-from reasoning.router import route_retrieval, classify_query
-from retrieval.pgvector import cluster_routed_search
-from retrieval.kuzu_store import get_entity_context
+from reasoning.router import classify_query
+from reasoning.query_interpreter import interpret_query
+from retrieval.pgvector import (
+    hard_filter_docs,
+    doc_level_soft_rank,
+    document_routed_search,
+)
+from retrieval.kuzu_store import get_entity_context, structural_expansion
 from retrieval.reranker import rerank
 from context.builder import build_context
 from llm.generator import generate
@@ -140,7 +145,8 @@ h1, h2, h3 { font-weight: 600 !important; letter-spacing: -0.02em !important; }
 }
 .status-active { background: rgba(29, 155, 240, 0.15); color: var(--accent-primary); }
 .status-inactive { background: var(--bg-interactive); color: var(--text-muted); }
-.status-success { background: rgba(0, 186, 124, 0.15); color: var(--accent-success); }
+.status-api { background: rgba(0, 186, 124, 0.15); color: var(--accent-success); }
+.status-local { background: rgba(245, 158, 11, 0.15); color: var(--accent-warning); }
 
 /* Metrics row */
 .metric-row {
@@ -162,38 +168,65 @@ h1, h2, h3 { font-weight: 600 !important; letter-spacing: -0.02em !important; }
 }
 """
 
-def query_rag(question: str, use_reranker: bool, use_graph: bool, top_k: int):
+
+def query_rag(
+    question: str, use_reranker: bool, use_graph: bool, use_siblings: bool, top_k: int
+):
     """Run RAG pipeline with toggles and return detailed intermediates."""
     if not question.strip():
-        return ("Enter a question to start.", "", "", [], [], [], "", "")
+        return ("Enter a question to start.", "", "", [], [], [], "", "", "")
 
-    strategy = route_retrieval(question)
     complexity = classify_query(question)
-    emb = embedder([question])[0]
+    interpreted = interpret_query(question)
+    semantic_query = interpreted.get("semantic_query", question)
+    filters = interpreted.get("filters", {})
+    query_emb = embedder([semantic_query])[0]
 
-    import psycopg
-    q = "[" + ",".join(str(x) for x in emb) + "]"
-    coarse_results = []
+    # Stage 1: hard filter
+    doc_ids = hard_filter_docs(
+        doc_type=filters.get("doc_type"),
+        is_latest=filters.get("is_latest"),
+        date_after=filters.get("date_after"),
+    )
+    hard_filter_count = len(doc_ids)
 
-    with psycopg.connect(settings.database.conninfo) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """SELECT cluster_id, 1 - (embedding <=> %s::vector) AS sim, chunk_id, source_id
-                   FROM chunks WHERE is_medoid AND cluster_id IS NOT NULL
-                   ORDER BY embedding <=> %s::vector LIMIT 10""",
-                (q, q),
-            )
-            coarse_results = [
-                (r[0], round(r[1], 4), r[2][:8], r[3][:40])
-                for r in cur.fetchall()
-            ]
+    # Stage 2: doc-level soft ranking
+    ranked_docs = doc_level_soft_rank(query_emb, semantic_query, doc_ids)
+    if ranked_docs:
+        doc_ids = [d[0] for d in ranked_docs]
+        doc_rank_map = {d[0]: i + 1 for i, d in enumerate(ranked_docs)}
+        doc_stage = [
+            (i + 1, d[0][:8], f"{d[1]:.4f}") for i, d in enumerate(ranked_docs[:10])
+        ]
+    else:
+        doc_rank_map = None
+        doc_stage = []
 
-    chunks = cluster_routed_search(emb, fine_k=15, global_k=5)
-    pre_rerank = [(i+1, round(c.score, 4), c.source_id[:40], c.text[:80]+"...") for i, c in enumerate(chunks[:10])]
+    # Stage 3-4: chunk-level hybrid search + RRF fusion
+    chunks = document_routed_search(
+        query_emb, semantic_query, doc_ids, doc_rank_map=doc_rank_map
+    )
+    pre_rerank = [
+        (i + 1, round(c.score, 4), c.source_id[:40], c.text[:80] + "...")
+        for i, c in enumerate(chunks[:10])
+    ]
 
+    # Stage 5: rerank
     if use_reranker and chunks:
-        chunks = rerank(question, chunks, top_k=top_k)
+        chunks = rerank(semantic_query, chunks, top_k=top_k)
 
+    # Stage 6: structural expansion
+    sibling_chunks = []
+    if use_siblings and chunks:
+        seed_ids = [c.chunk_id for c in chunks]
+        try:
+            sibling_chunks = structural_expansion(seed_ids)
+            if sibling_chunks:
+                LOGGER.info("Structural expansion: %d siblings.", len(sibling_chunks))
+        except Exception as e:
+            LOGGER.warning(f"Structural expansion skipped ({e})")
+
+    # Stage 7: graph facts
     graph_facts = ""
     graph_entities = []
     if use_graph:
@@ -211,36 +244,62 @@ def query_rag(question: str, use_reranker: bool, use_graph: bool, top_k: int):
     context, citations = build_context(chunks, graph_facts, max_tokens=1500)
     answer = generate(question, context)
 
-    # Compact routing display
+    emb_backend = settings.embedding.backend
+    rerank_backend = settings.reranker.backend
+    gen_backend = settings.generator.backend
+
     routing = f"""<div class="metric-row">
 <div class="metric-item"><span class="metric-label">Complexity</span><span class="metric-value">{complexity.value.upper()}</span></div>
-<div class="metric-item"><span class="metric-label">Vector</span><span class="status-badge status-success">ON</span></div>
-<div class="metric-item"><span class="metric-label">BM25</span><span class="status-badge {'status-active' if strategy['use_bm25'] else 'status-inactive'}">{'ON' if strategy['use_bm25'] else 'OFF'}</span></div>
-<div class="metric-item"><span class="metric-label">Graph</span><span class="status-badge {'status-active' if use_graph else 'status-inactive'}">{'ON' if use_graph else 'OFF'}</span></div>
-<div class="metric-item"><span class="metric-label">Rerank</span><span class="status-badge {'status-active' if use_reranker else 'status-inactive'}">{'ON' if use_reranker else 'OFF'}</span></div>
+<div class="metric-item"><span class="metric-label">Filters</span><span class="metric-value" style="font-size:13px;">{"&#183;".join(k for k, v in filters.items() if v) or "none"}</span></div>
+<div class="metric-item"><span class="metric-label">Embed</span><span class="status-badge {"status-api" if emb_backend == "api" else "status-local"}">{emb_backend.upper()}</span></div>
+<div class="metric-item"><span class="metric-label">Rerank</span><span class="status-badge {"status-api" if rerank_backend == "api" and use_reranker else "status-local" if rerank_backend != "api" and use_reranker else "status-inactive"}">{"ON" if use_reranker else "OFF"}</span></div>
+<div class="metric-item"><span class="metric-label">Generate</span><span class="status-badge {"status-api" if gen_backend == "api" else "status-local"}">{gen_backend.upper()}</span></div>
+<div class="metric-item"><span class="metric-label">Graph</span><span class="status-badge {"status-active" if use_graph else "status-inactive"}">{"ON" if use_graph else "OFF"}</span></div>
 <div class="metric-item"><span class="metric-label">Top-K</span><span class="metric-value">{top_k}</span></div>
 </div>"""
 
     retrieval = f"""<div style="color: var(--text-secondary); font-size: 13px;">
-<span style="color: var(--text-primary); font-weight: 600;">{len(coarse_results)}</span> medoid candidates → 
-<span style="color: var(--text-primary); font-weight: 600;">{len(chunks)}</span> fine-grained chunks
+<span style="color: var(--text-primary); font-weight: 600;">{hard_filter_count}</span> docs (hard filter) → 
+<span style="color: var(--text-primary); font-weight: 600;">{len(ranked_docs)}</span> docs (soft rank) → 
+<span style="color: var(--text-primary); font-weight: 600;">{len(chunks)}</span> chunks → 
+<span style="color: var(--text-primary); font-weight: 600;">{len(sibling_chunks)}</span> siblings
 </div>"""
 
-    final = [(c.source_id[:50], f"{c.score:.4f}", c.text[:120]+"...") for c in chunks[:top_k]]
-    citations_text = "\n".join([f"[{c.ref_id}] {c.source_id} — {c.text_preview}..." for c in citations])
+    final = [
+        (c.source_id[:50], f"{c.score:.4f}", c.text[:120] + "...")
+        for c in chunks[:top_k]
+    ]
+    citations_text = "\n".join(
+        [f"[{c.ref_id}] {c.source_id} — {c.text_preview}..." for c in citations]
+    )
 
     graph_disp = f"Entities: {', '.join(graph_entities) if graph_entities else 'None'}\n\n{graph_facts if graph_facts else 'No graph facts retrieved.'}"
+    siblings_disp = (
+        "\n".join([f"[{s[0][:8]}] {s[1][:100]}..." for s in sibling_chunks[:10]])
+        if sibling_chunks
+        else "No structural expansion applied."
+    )
 
-    return (answer, routing, retrieval, coarse_results, pre_rerank, final, citations_text, graph_disp)
+    return (
+        answer,
+        routing,
+        retrieval,
+        doc_stage,
+        pre_rerank,
+        final,
+        citations_text,
+        graph_disp,
+        siblings_disp,
+    )
 
 
 def create_demo():
-    with gr.Blocks(title="Hybrid-RAG Demo", css=CUSTOM_CSS, theme=gr.themes.Base()) as demo:
+    with gr.Blocks(title="Hybrid-RAG Demo") as demo:
         # Header
         gr.HTML("""
 <div style="padding: 24px 0 16px; border-bottom: 1px solid var(--border-subtle); margin-bottom: 24px;">
 <h1 style="margin: 0 0 8px; font-size: 28px; color: var(--text-primary);">Hybrid-RAG</h1>
-<p style="margin: 0; color: var(--text-secondary); font-size: 14px;">Retrieval pipeline internals — coarse→fine routing, cross-encoder reranking, knowledge graph traversal</p>
+<p style="margin: 0; color: var(--text-secondary); font-size: 14px;">8-stage retrieval funnel — hard filter → doc soft rank → chunk hybrid → RRF fusion → rerank → graph expansion → facts → generate</p>
 </div>
 """)
 
@@ -250,20 +309,37 @@ def create_demo():
                     label="Question",
                     placeholder="Ask about your documents...",
                     lines=2,
-                    elem_classes=["input-box"]
+                    elem_classes=["input-box"],
                 )
                 with gr.Row():
-                    use_reranker = gr.Checkbox(value=True, label="Reranking", info="Cross-encoder relevance scoring")
-                    use_graph = gr.Checkbox(value=True, label="Knowledge Graph", info="Entity context from KùzuDB")
+                    use_reranker = gr.Checkbox(
+                        value=True,
+                        label="Reranking",
+                        info="Cross-encoder relevance scoring",
+                    )
+                    use_graph = gr.Checkbox(
+                        value=True,
+                        label="Knowledge Graph",
+                        info="Entity context from KùzuDB",
+                    )
+                    use_siblings = gr.Checkbox(
+                        value=True,
+                        label="Structural Expansion",
+                        info="Small-to-big graph traversal for sibling chunks",
+                    )
                     top_k = gr.Slider(1, 20, value=5, step=1, label="Top-K Results")
 
-                ask_btn = gr.Button("Ask", variant="primary", size="lg", elem_classes=["primary-btn"])
+                ask_btn = gr.Button(
+                    "Ask", variant="primary", size="lg", elem_classes=["primary-btn"]
+                )
 
         with gr.Tabs():
             with gr.TabItem("Answer"):
                 answer_out = gr.Markdown(elem_classes=["prose"])
                 with gr.Accordion("Citations", open=False):
-                    citations_out = gr.Textbox(lines=6, interactive=False, show_label=False)
+                    citations_out = gr.Textbox(
+                        lines=6, interactive=False, show_label=False
+                    )
 
             with gr.TabItem("Routing"):
                 routing_out = gr.HTML()
@@ -271,41 +347,70 @@ def create_demo():
             with gr.TabItem("Retrieval"):
                 retrieval_out = gr.HTML()
                 with gr.Row():
-                    coarse_out = gr.Dataframe(
-                        headers=["Cluster", "Score", "ID", "Source"],
-                        label="Coarse Stage (Medoid Search)",
-                        elem_classes=["dataframe"]
+                    doc_stage_out = gr.Dataframe(
+                        headers=["Rank", "Doc ID", "Score"],
+                        label="Stage 2: Doc-Level Soft Rank",
+                        elem_classes=["dataframe"],
                     )
                     pre_rerank_out = gr.Dataframe(
                         headers=["Rank", "Score", "Source", "Preview"],
-                        label="Pre-Rerank Candidates",
-                        elem_classes=["dataframe"]
+                        label="Stage 3-4: Chunk Candidates (pre-rerank)",
+                        elem_classes=["dataframe"],
                     )
 
             with gr.TabItem("Final Chunks"):
                 final_out = gr.Dataframe(
                     headers=["Source", "Score", "Text"],
-                    label=f"Top-K After Rerank",
-                    elem_classes=["dataframe"]
+                    label="Stage 5: Top-K After Rerank",
+                    elem_classes=["dataframe"],
                 )
 
             with gr.TabItem("Graph"):
-                graph_out = gr.Textbox(lines=10, interactive=False, label="Knowledge Graph Facts")
+                graph_out = gr.Textbox(
+                    lines=10, interactive=False, label="Stage 7: Knowledge Graph Facts"
+                )
+
+            with gr.TabItem("Siblings"):
+                siblings_out = gr.Textbox(
+                    lines=10,
+                    interactive=False,
+                    label="Stage 6: Structural Expansion (Sibling Chunks)",
+                )
 
         ask_btn.click(
             query_rag,
-            [question, use_reranker, use_graph, top_k],
-            [answer_out, routing_out, retrieval_out, coarse_out, pre_rerank_out, final_out, citations_out, graph_out],
+            [question, use_reranker, use_graph, use_siblings, top_k],
+            [
+                answer_out,
+                routing_out,
+                retrieval_out,
+                doc_stage_out,
+                pre_rerank_out,
+                final_out,
+                citations_out,
+                graph_out,
+                siblings_out,
+            ],
         )
 
         gr.Examples(
-            [["What is this document about?"], ["How are these concepts related?"], ["Summarize the key findings"]],
+            [
+                ["What is this document about?"],
+                ["How are these concepts related?"],
+                ["Summarize the key findings"],
+                ["latest contract terms"],
+            ],
             question,
-            label="Try these"
+            label="Try these",
         )
 
     return demo
 
 
 if __name__ == "__main__":
-    create_demo().launch(server_name="0.0.0.0", server_port=7860)
+    create_demo().launch(
+        server_name="0.0.0.0",
+        server_port=7860,
+        css=CUSTOM_CSS,
+        theme=gr.themes.Base(),
+    )

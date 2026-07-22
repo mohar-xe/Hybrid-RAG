@@ -38,7 +38,7 @@ LOGGER = setup_logger(__name__)
 CHARS_PER_TOKEN = 4
 CHUNK_TOKENS = 300
 OVERLAP_TOKENS = 50
-CHUNK_CHARS = CHUNK_TOKENS * CHARS_PER_TOKEN      # ~1200 chars
+CHUNK_CHARS = CHUNK_TOKENS * CHARS_PER_TOKEN  # ~1200 chars
 OVERLAP_CHARS = OVERLAP_TOKENS * CHARS_PER_TOKEN  # ~200 chars
 
 # Separator priority: paragraph -> line -> sentence -> word -> character.
@@ -87,12 +87,12 @@ def _atomic_splits(text: str, separators: list[str], max_chars: int) -> list[str
     for i, s in enumerate(separators):
         if s and s in text:
             sep = s
-            rest = separators[i + 1:]
+            rest = separators[i + 1 :]
             break
 
     if sep is None:
         # No separator left: hard char split.
-        return [text[i:i + max_chars] for i in range(0, len(text), max_chars)]
+        return [text[i : i + max_chars] for i in range(0, len(text), max_chars)]
 
     pieces: list[str] = []
     for part in text.split(sep):
@@ -140,7 +140,9 @@ def _merge_splits(splits: list[str], max_chars: int, overlap_chars: int) -> list
     return chunks
 
 
-def chunk_text(text: str, chunk_chars: int = CHUNK_CHARS, overlap_chars: int = OVERLAP_CHARS) -> list[ChunkDraft]:
+def chunk_text(
+    text: str, chunk_chars: int = CHUNK_CHARS, overlap_chars: int = OVERLAP_CHARS
+) -> list[ChunkDraft]:
     """Recursively split ``text`` into bounded chunks and embed them.
 
     Returns ``ChunkDraft``s (text + L2-normalized embedding). Every chunk is at
@@ -152,7 +154,7 @@ def chunk_text(text: str, chunk_chars: int = CHUNK_CHARS, overlap_chars: int = O
         return []
 
     # Defensive: strip NUL/control bytes (PostgreSQL text rejects NUL). The PDF
-    # path already does this in clean_pdf_text; YouTube/audio sources don't.
+    # path already does this in clean_pdf_text.
     text = _CONTROL_CHARS.sub("", text)
 
     atoms = _atomic_splits(text, SEPARATORS, chunk_chars)
@@ -166,7 +168,9 @@ def chunk_text(text: str, chunk_chars: int = CHUNK_CHARS, overlap_chars: int = O
     )
 
     vectors = _l2_normalize(np.array(embedder(chunk_strs)))
-    return [ChunkDraft(text=t, embedding=v.tolist()) for t, v in zip(chunk_strs, vectors)]
+    return [
+        ChunkDraft(text=t, embedding=v.tolist()) for t, v in zip(chunk_strs, vectors)
+    ]
 
 
 def extract_keyphrases(text: str) -> list[str]:
@@ -175,6 +179,7 @@ def extract_keyphrases(text: str) -> list[str]:
         return []
     try:
         import yake
+
         kw_extractor = yake.KeywordExtractor(
             lan="en",
             n=3,
@@ -189,7 +194,12 @@ def extract_keyphrases(text: str) -> list[str]:
     return [kw for kw, score in keywords_score]
 
 
-def chunk_enrich(chunks: list[ChunkDraft], source: Literal["PDF", "Reel", "Youtube"], id: str) -> list[Chunk]:
+def chunk_enrich(
+    chunks: list[ChunkDraft],
+    source: Literal["PDF", "Reel", "Youtube"],
+    id: str,
+    doc_id: str | None = None,
+) -> list[Chunk]:
     """Promote drafts to stored Chunks, reusing each draft's embedding."""
     finalized_chunks = []
     for idx, draft in enumerate(chunks):
@@ -201,6 +211,7 @@ def chunk_enrich(chunks: list[ChunkDraft], source: Literal["PDF", "Reel", "Youtu
             source_id=id,
             chunk_index=idx,
             keyword=extract_keyphrases(draft.text),
+            doc_id=doc_id,
         )
         finalized_chunks.append(enriched)
     return finalized_chunks

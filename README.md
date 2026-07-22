@@ -1,6 +1,10 @@
+---
+license: mit
+---
+
 # Hybrid-RAG
 
-**A production-minded hybrid retrieval-augmented generation engine that fuses dense vector search, sparse full-text search, and knowledge-graph traversal — with a reproducible benchmark harness to prove each component earns its place.**
+**A production-minded hybrid retrieval-augmented generation engine that fuses dense vector search, sparse full-text search, and knowledge-graph traversal — deployable as an API-only service with Neon Postgres.**
 
 <p>
 <code>Python 3.12</code> ·
@@ -37,36 +41,50 @@ Most "RAG" projects stop at *embed → cosine search → stuff into a prompt*. T
 
 ## Highlights
 
-- **Three retrieval signals, fused — not bolted on.** Dense (pgvector cosine), sparse (Postgres `tsvector`/BM25), and a Kùzu knowledge graph, combined with Reciprocal Rank Fusion and re-scored by a cross-encoder.
-- **Coarse→fine cluster-routed retrieval.** Chunks are clustered with spherical K-Means; each cluster keeps a *medoid*. Queries first search medoids only (coarse), route to the best clusters, then search within them (fine) — with a flat-ANN safety net and score gate so it degrades gracefully before indexing has run.
+- **8-stage retrieval funnel.** Query understanding → hard SQL filters → doc-level soft ranking (summary + question ANN + entity boost) → chunk-level hybrid search (dense + lexical) → cross-list RRF fusion → cross-encoder rerank → structural graph expansion (small-to-big) → KG facts. Every stage is independently measurable.
+- **Document-level clustering, not K-Means medoids.** Each document gets rich metadata at ingest time (Gemini-extracted title, summary, synthetic questions, topic tags, entities, version info). Synthetic questions are indexed individually — a query phrased as a question matches those vectors far better than a pooled centroid.
 - **A knowledge graph that maintains itself.** LLM triplet extraction (two interchangeable backends), schema-validated relations, and **ANN-based near-duplicate node merging** (`hnswlib` candidate search + a lexical-overlap gate + chaining-safe "absorb-only" merges) to keep the graph clean as it grows.
 - **Bring-your-own extraction model.** The default backend is a remote OpenAI-compatible API (DeepSeek); the `local` backend serves a **fine-tuned Qwen3-0.6B** (`hgr-triplet:q4`) through Ollama for fully offline triplet extraction.
+- **Document versioning.** Track revisions with `--version-label` / `--supersedes` flags; the query interpreter infers `is_latest` semantics and applies `NOT EXISTS` hard filters over the version chain.
 - **Faithfulness verification.** An opt-in NLI cross-encoder (DeBERTa) scores how well each answer sentence is entailed by the retrieved context.
 - **Evidence, not vibes.** A reproducible HotpotQA harness runs a 7-configuration ablation (direct / semantic / +BM25 / +graph × rerank on/off) and reports F1, EM, recall, retrieval hit@k, answer-in-context, and latency percentiles.
-- **Two entry points over one core.** A Typer CLI (`ingest`, `reindex`, `ask`, `merge-graph`) and a FastAPI service (`/ingest`, `/query`, `/health`) with API-key auth, path-traversal protection, async ingestion, and token streaming.
+- **Two entry points over one core.** A Typer CLI (`ingest`, `ask`, `merge-graph`) and a FastAPI service (`/ingest`, `/query`, `/health`) with API-key auth, file-upload ingestion, async processing, and token streaming.
 
 ---
 
 ## Architecture
 
 ```
-                          ┌──────────────────────────── INGESTION ────────────────────────────┐
-   PDF / YouTube / audio → │ extract → normalize (12-stage) → recursive chunk → keyphrase (YAKE)│
-                          └───────────────┬───────────────────────────────┬───────────────────┘
-                                          │ embed (nomic-embed-text, 256-d)│ LLM triplet extraction
-                                          ▼                                ▼
-                              ┌───────────────────────┐        ┌────────────────────────────┐
-                              │  PostgreSQL + pgvector │        │           KùzuDB           │
-                              │  chunks: HNSW + GIN    │        │  Entity ─RELATES_TO→ Entity │
-                              │  cluster_id / medoid   │        │  Entity ─MENTIONED_IN→ Chunk│
-                              └───────────┬────────────┘        └───────────────┬────────────┘
-                                          │  reindex: K-Means + medoids          │ merge-graph: ANN dedup
-                                          │                                      │
-   ┌──────────────────────────────────── RETRIEVAL & ANSWER ────────────────────────────────────┐
-   │ query → embed → coarse→fine cluster-routed ANN  (+BM25, +graph facts)                        │
-   │       → RRF fuse → cross-encoder rerank → context builder (token budget, citations)          │
-   │       → OpenAI-compatible generation (stream)   → optional NLI faithfulness score            │
-   └─────────────────────────────────────────────────────────────────────────────────────────────┘
+                    ┌──────────────────────── INGESTION ────────────────────────┐
+   PDF → │ extract → Gemini metadata (title, summary, questions, entities) │
+         │                           → chunk + embed (256-d)                │
+         │                           → KG triplet extraction → Kùzu         │
+         └───────────────────────────┬───────────────────────────────────────┘
+                                     │ document_clusters + document_questions
+                                     ▼
+                    ┌──────────────────────────────────────────────────────────┐
+                    │  PostgreSQL + pgvector (HNSW + GIN)                      │
+                    │  • document_clusters: summary_emb + synthetic questions  │
+                    │  • document_questions: per-question vectors              │
+                    │  • chunks: doc_id FK, dense + tsvector + keyword[]      │
+                    └──────────────────────────────────────────────────────────┘
+                                      +
+                    ┌──────────────────────────────────────────────────────────┐
+                    │  KùzuDB: Entity ─RELATES_TO→ Entity                      │
+                    │          Entity ─MENTIONED_IN→ Chunk                     │
+                    └──────────────────────────────────────────────────────────┘
+
+   ┌────────────── RETRIEVAL & ANSWER (8-stage funnel) ──────────────────────────┐
+   │ 0. Query understanding → semantic_query + filters                           │
+   │ 1. Hard filter (SQL WHERE on doc_type, is_latest, date_after)               │
+   │ 2. Doc-level soft rank (summary ANN + question ANN + entity boost, RRF)     │
+   │ 3. Chunk hybrid search (dense ANN + tsvector, restricted to top docs)       │
+   │ 4. Cross-list RRF fusion (doc-level + dense + lexical)                      │
+   │ 5. Cross-encoder rerank (ms-marco-MiniLM)                                   │
+   │ 6. Structural expansion (small-to-big graph traversal)                      │
+   │ 7. Graph facts (multi-hop BFS entity context)                               │
+   │ 8. Assemble + generate (citation-ready prompt → LLM)                        │
+   └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 Configuration, logging, a typed exception hierarchy, and idempotent schema migration sit under all of it.
@@ -75,21 +93,24 @@ Configuration, logging, a typed exception hierarchy, and idempotent schema migra
 
 The `ask` CLI command and `POST /query` share the same pipeline:
 
-1. **Route.** A heuristic router classifies query complexity and decides whether to consult the graph.
-2. **Embed.** The question is embedded with `nomic-embed-text` (truncated to 256 dims, Matryoshka-style).
-3. **Retrieve (coarse→fine).** `cluster_routed_search` searches cluster medoids, selects the top clusters, then searches inside them — merging a parallel global ANN pass as a fallback and de-duplicating by best score.
-4. **Rerank.** A cross-encoder (`ms-marco-MiniLM-L-6-v2`) re-scores the candidate pool down to the final top-k.
-5. **Graph facts (optional).** For entity-rich queries, high-confidence relations are pulled from Kùzu.
-6. **Assemble.** A token-budgeted context builder packs chunks + graph facts into a numbered, citation-ready prompt.
-7. **Generate.** Any OpenAI-compatible endpoint produces the answer (streaming supported).
-8. **Verify (optional).** An NLI model scores answer-vs-context faithfulness.
+1. **Route + interpret.** The query router classifies complexity; the query interpreter (Gemini Flash-Lite or heuristic) extracts `semantic_query` + structured filters (`doc_type`, `is_latest`, `date_after`, `entities`).
+2. **Hard filter.** SQL WHERE over `document_clusters` — doc_type, version-chain head, content_date — with a multi-stage safety valve that drops filters one at a time rather than returning empty results.
+3. **Doc-level soft rank.** ANN over summary embeddings + max-over-question embeddings + entity/topic overlap boost, fused via RRF → top 25 documents.
+4. **Chunk hybrid search.** Dense ANN + tsvector lexical search restricted to the top 25 docs → fused via RRF.
+5. **Cross-list RRF fusion.** Three signals combined: doc-level rank + chunk dense rank + chunk lexical rank.
+6. **Cross-encoder rerank.** `ms-marco-MiniLM-L-6-v2` re-scores the candidate pool to the final top-k.
+7. **Structural expansion (optional).** Small-to-big graph traversal: seed chunks → entities → relations → sibling chunks.
+8. **Graph facts (optional).** For entity-rich queries, multi-hop BFS entity context from Kùzu.
+9. **Assemble.** A token-budgeted context builder packs chunks + graph facts into a numbered, citation-ready prompt.
+10. **Generate.** Any OpenAI-compatible endpoint produces the answer (streaming supported).
+11. **Verify (optional).** An NLI model scores answer-vs-context faithfulness.
 
 ## Engineering decisions worth a look
 
 These are the parts that show *why*, not just *what* — the reasoning is documented inline in the code and expanded in [`docs/report.md`](docs/report.md).
 
 - **Bound the chunk before you embed it.** Chunking is a `RecursiveCharacterTextSplitter` (separators `["\n\n", "\n", ". ", " "]` → hard char split) packing ~300-token chunks with ~50-token overlap, using a 4-chars/token approximation so there is **no tokenizer dependency**. This replaced an earlier paragraph-embed-then-cluster design that could feed 25k-token blobs to the embedder and 400.
-- **Cheap coarse pass, accurate fine pass.** Searching medoids first turns a full-corpus ANN into a small routing decision, then restricts the expensive search to a few clusters — with a similarity **score gate** that falls back to flat global ANN when clustering hasn't run or routing is weak. Retrieval works *before* `reindex`; it just gets better after.
+- **Document-level clustering, not K-Means medoids.** Centroid-based document representations are lossy (they wash out the specific questions a document answers). Indexing each synthetic question as its own embedding preserves that signal — a query phrased as a question matches the question vectors far better than a pooled summary.
 - **The graph stays clean at scale.** Node de-duplication uses an in-memory **HNSW** index instead of O(N²) all-pairs comparison, and persists entity-name embeddings so repeat runs only embed new entities. A candidate pair must clear **both** a cosine threshold **and** a character-trigram lexical gate — embedding similarity alone conflates "same shape" with "same entity" (distinct author names or `"X theorem"` phrases score ≥0.90), so the lexical gate is what stops unrelated names from merging. Merging is then **absorb-only**: a canonical node absorbs its duplicates but a merged-away node never becomes a survivor, so a stray false match folds at most one node instead of chaining a whole component into one super-node. It is a dry-run by default; merges only happen with `--apply`.
 - **Concurrency where it pays, serialization where it must.** Triplet extraction is I/O-bound, so it runs concurrently in a thread pool; Kùzu writes are serialized (a Kùzu connection isn't thread-safe, and it allows a single writer). Ingestion threads **one** graph connection through the whole phase instead of reopening per chunk.
 - **Embedding is the expensive step, so don't repeat it.** Ingestion has independently toggleable `--store` and `--graph` phases; a transient extraction failure can be retried with `--no-store --graph` against already-embedded chunks, and per-chunk extraction failures are logged and skipped, never fatal.
@@ -140,12 +161,9 @@ uv run python pipeline.py ask "What is this document about?" --verbose
 ## CLI usage
 
 ```bash
-# Ingest (two independent phases: --store/--no-store and --graph/--no-graph)
-uv run python pipeline.py ingest <path|video_id> --type pdf|youtube|audio [--extractor local|deepseek]
+# Ingest (three phases: metadata + store + graph, independently toggleable)
+uv run python pipeline.py ingest <path> --type pdf [--extractor local|deepseek] [--version-label v2] [--supersedes <doc_id>]
 uv run python pipeline.py ingest <path> --no-store --graph    # re-run graph only, reusing stored chunks
-
-# Index for routed retrieval (run after ingest; safe to re-run as the corpus grows)
-uv run python pipeline.py reindex
 
 # Ask
 uv run python pipeline.py ask "your question" --top-k 5 --verbose
@@ -155,21 +173,22 @@ uv run python pipeline.py merge-graph
 uv run python pipeline.py merge-graph --apply --threshold 0.92
 ```
 
-Typical order: **`ingest` → `reindex` → `ask`**, running `merge-graph --apply` any time after ingest to dedupe entities.
+Typical order: **`ingest` → `ask`**, running `merge-graph --apply` any time after ingest to dedupe entities.
 
 ## HTTP API
 
 ```bash
 cd src
-uv run uvicorn api.app:app --reload      # http://localhost:8000  (interactive docs at /docs)
+uv run uvicorn api.app:app --reload --port 8000  # http://localhost:8000  (docs at /docs)
 ```
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/ingest` | `POST` | Fire-and-forget ingestion (returns a `task_id`); file paths must resolve inside the allow-listed `API__INGEST_DIR` |
-| `/ingest/{task_id}` | `GET` | Poll ingestion status |
-| `/query` | `POST` | Ask a question; supports `stream: true` and optional `faithfulness` scoring |
-| `/health` | `GET` | Liveness of Postgres, Ollama, and the graph store |
+| `/ingest` | `POST` | Ingest by server file path (gated by `API__INGEST_DIR`) |
+| `/ingest/upload` | `POST` | Ingest by file upload (multipart form, PDF only) |
+| `/ingest/{task_id}` | `GET` | Poll ingestion task status |
+| `/query` | `POST` | Ask a question; supports `stream: true` and optional `faithfulness` |
+| `/health` | `GET` | Liveness of Postgres and graph store |
 
 ```bash
 # Set API__API_KEY in .env, then send it on every request:
@@ -190,12 +209,12 @@ uv run python demo/app.py                # http://localhost:7860
 ```
 
 **Features exposed:**
-- **Query routing** — shows heuristic complexity classification (simple/moderate/complex)
-- **Coarse→fine retrieval** — medoid candidates (coarse) and cluster-filtered results (fine)
-- **Pre/post-rerank tables** — compare candidate scores before and after cross-encoder reranking
-- **Final top-K chunks** — source, score, and text preview for each retrieved chunk
+- **Query routing + filters** — complexity classification and interpreted filters (doc_type, is_latest, entities)
+- **Doc-level soft rank** — summary + question ANN scores for the top candidate documents
+- **Pre/post-rerank tables** — compare candidate chunks before and after cross-encoder reranking
+- **Structural expansion** — sibling chunks surfaced via small-to-big graph traversal
 - **Knowledge graph facts** — entities extracted and graph relations pulled from KùzuDB
-- **Toggleable components** — enable/disable reranking and graph lookup to demonstrate ablation
+- **Toggleable components** — enable/disable reranking, graph facts, and structural expansion to demonstrate ablation
 
 **Use case:** Show hiring managers *exactly* what the system retrieves, how it routes, and why each component matters. Perfect for demonstrating systems-level thinking and retrieval architecture.
 
@@ -223,17 +242,20 @@ uv run --extra dev pytest        # tests under evaluation/tests/
 src/
 ├── config/          Pydantic settings + DB schema init / idempotent migrations
 ├── constants/       Rotating logger + typed exception hierarchy (BaseError root)
-├── ingestion/       Extractor, 12-stage normalizer, recursive chunker, chunk schema
-├── embeddings/      nomic-embed-text via Ollama (256-d, batched, char-capped)
+├── ingestion/       Extractor, document_cluster (Gemini metadata), recursive chunker, chunk schema
+├── embeddings/      nomic-embed-text via Ollama / API / sentence-transformers (256-d)
 ├── graph/           Triplet schema, dual-backend entity extraction, ANN node merge
-├── retrieval/       pgvector (cluster-routed), K-Means/medoids, reranker, Kùzu store, forced search
+├── retrieval/       pgvector (8-stage funnel: hard_filter_docs, doc_level_soft_rank, document_routed_search),
+│                      reranker, Kùzu store (structural_expansion + multi-hop entity context)
 ├── context/         Token-budgeted context builder with citations
 ├── llm/             OpenAI-compatible generation (streaming + closed-book)
-├── reasoning/       Heuristic query router
+├── reasoning/       Query router + query interpreter (Gemini Flash-Lite → semantic_query + filters)
 ├── verification/    NLI faithfulness scorer (opt-in)
-├── api/             FastAPI service (auth, async ingest, streaming query)
+├── api/             FastAPI service (auth, file-upload ingest, async query)
+├── cache.py         LRU cache (embedding, metadata, query)
+├── models/          Client, fallback, rate limiter
 ├── demo/            Gradio UI for interactive demos with retrieval internals
-└── pipeline.py      Typer CLI — the real entry point (ingest, reindex, ask, merge-graph)
+└── pipeline.py      Typer CLI — the real entry point (ingest, ask, merge-graph)
 
 evaluation/          Reproducible HotpotQA ablation harness (+ unit tests)
 docs/report.md       Beginner-friendly, function-by-function walkthrough of the whole codebase
@@ -255,6 +277,106 @@ Implemented features are listed above and verifiable in `src/`. Planned (config 
 - **Pre-generation retrieval-quality gating** — skip or re-query when context looks irrelevant
 - **Agentic routing** — replace the heuristic router with a learned/tool-using planner
 - **Real-time graph visualization**
+
+## Deploy to Render (free tier, includes Postgres)
+
+This project runs as a **fully API-only service** (no local models) with a managed Postgres database. Deploy to [Render's free tier](https://render.com/pricing) — includes Postgres, Docker support, and auto-deploys from GitHub. Note: free web services spin down after 15 minutes of inactivity (cold start ~30s).
+
+### Option A: One-click with Render Blueprint (recommended)
+
+The included [`render.yaml`](render.yaml) declares both the web service and a free Postgres database. Render auto-detects it:
+
+1. Push this repo to GitHub.
+2. In the [Render Dashboard](https://dashboard.render.com), click **New +** → **Blueprint**.
+3. Connect your GitHub repo. Render reads `render.yaml` and creates:
+   - A **Postgres database** (`hybrid-rag-db`, free tier)
+   - A **Web Service** (`hybrid-rag`, Docker, free tier)
+4. Before the first deploy, set the **sync: false** secrets in your service's **Environment** tab:
+
+| Variable | Where to get it |
+|----------|----------------|
+| `GENERATOR__BASE_URL` | `https://openrouter.ai/api/v1` |
+| `GENERATOR__MODEL` | `google/gemini-3.6-flash` |
+| `GENERATOR__API_KEY` | [OpenRouter keys](https://openrouter.ai/keys) |
+| `NER__BASE_URL` | `https://generativelanguage.googleapis.com/v1beta/openai` |
+| `NER__MODEL` | `gemini-3.6-flash` |
+| `NER__API_KEY` | [Gemini API key](https://makersuite.google.com/app/apikey) |
+| `EMBEDDING__API_BASE_URL` | `https://api.mistral.ai/v1` |
+| `EMBEDDING__API_KEY` | [Mistral keys](https://console.mistral.ai/api-keys/) |
+| `RERANKER__API_BASE_URL` | `https://api.mistral.ai/v1` |
+| `RERANKER__API_KEY` | Same Mistral key as above |
+| `API__API_KEY` | Pick a key to gate your API |
+
+5. Click **Apply**. Render builds the Dockerfile, provisions Postgres (with `pgvector`), and wires the connection env vars automatically.
+
+Your API is live at `https://hybrid-rag.onrender.com`.
+
+### Option B: Manual setup (without Blueprint)
+
+1. Push this repo to GitHub.
+2. In Render Dashboard → **New +** → **Web Service**, connect your repo.
+3. Settings:
+   - **Name:** `hybrid-rag`
+   - **Environment:** `Docker`
+   - **Plan:** Free
+4. Add a **Postgres database**: Render Dashboard → **New +** → **PostgreSQL** (free tier).
+5. Copy the internal connection string from your database dashboard and set these env vars on your web service:
+
+```
+DATABASE__HOST=<internal-host>
+DATABASE__PORT=5432
+DATABASE__DB_NAME=<db-name>
+DATABASE__USER=<user>
+DATABASE__PASSWORD=<password>
+GENERATOR__BASE_URL=https://openrouter.ai/api/v1
+GENERATOR__MODEL=google/gemini-3.6-flash
+GENERATOR__API_KEY=<your-key>
+NER__BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
+NER__MODEL=gemini-3.6-flash
+NER__API_KEY=<your-key>
+EMBEDDING__BACKEND=api
+EMBEDDING__API_BASE_URL=https://api.mistral.ai/v1
+EMBEDDING__API_MODEL=mistral-embed
+EMBEDDING__API_KEY=<your-key>
+RERANKER__BACKEND=api
+RERANKER__API_BASE_URL=https://api.mistral.ai/v1
+RERANKER__API_MODEL=mistral-large-latest
+RERANKER__API_KEY=<your-key>
+API__API_KEY=<your-key>
+```
+
+6. **Enable pgvector** — connect to your Render Postgres once (via `psql` or the Render shell) and run:
+   ```sql
+   CREATE EXTENSION IF NOT EXISTS vector;
+   ```
+
+7. Deploy. Render builds and starts the service.
+
+### Ingest & query
+
+```bash
+# Upload a PDF
+curl -X POST https://hybrid-rag.onrender.com/ingest/upload \
+  -H "X-API-Key: $API_KEY" \
+  -F "file=@document.pdf"
+
+# Poll status
+curl https://hybrid-rag.onrender.com/ingest/<task_id> \
+  -H "X-API-Key: $API_KEY"
+
+# Ask
+curl -X POST https://hybrid-rag.onrender.com/query \
+  -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" \
+  -d '{"question": "What is this document about?", "top_k": 5}'
+```
+
+Interactive docs at `https://hybrid-rag.onrender.com/docs`.
+
+### Limitations
+
+- **Free tier spin-down.** Render spins down a free web service after 15 min of inactivity. First request after idle takes ~30s (cold start). Upgrade to a paid plan for zero spin-down.
+- **Kùzu graph store** is file-based and resets on each deploy (no persistent disk on Render free tier). Acceptable for demos. For production, store graph data in Postgres as JSONB.
+- **Uploaded files** stored in `/tmp/` are lost on restart. Re-ingest after redeploy.
 
 ## Related projects
 

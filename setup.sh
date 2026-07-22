@@ -24,13 +24,13 @@ warn()  { printf '\033[1;33m[!]\033[0m %s\n' "$*"; }
 # ---------------------------------------------------------------------------
 # 1. Python dependencies (uv)
 # ---------------------------------------------------------------------------
-info "Python dependencies (uv sync)"
+info "Python dependencies (uv sync, including local extras)"
 if ! command -v uv >/dev/null 2>&1; then
   warn "uv is not installed. Install it, then re-run this script:"
   warn "  curl -LsSf https://astral.sh/uv/install.sh | sh"
   exit 1
 fi
-uv sync
+uv sync --extra local
 
 # ---------------------------------------------------------------------------
 # 2. .env
@@ -70,8 +70,18 @@ fi
 info "Embedding model: nomic-embed-text (required for all retrieval)"
 ollama pull nomic-embed-text
 
+info "Fallback generator model: qwen2.5:7b (used when API is unavailable)"
+ollama pull qwen2.5:7b
+
 # ---------------------------------------------------------------------------
-# 4. Optional: local fine-tuned extraction model
+# 4. spaCy model for metadata fallback
+# ---------------------------------------------------------------------------
+info "spaCy model: en_core_web_sm (document metadata extraction fallback)"
+uv run python -m spacy download en_core_web_sm >/dev/null 2>&1 \
+  || warn "spaCy model download failed (metadata fallback will be unavailable)."
+
+# ---------------------------------------------------------------------------
+# 5. Optional: local fine-tuned extraction model
 # ---------------------------------------------------------------------------
 if [[ "$LOCAL" == "1" ]]; then
   info "Local extraction model: hgr-triplet:q4"
@@ -103,7 +113,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 5. PostgreSQL reminder (cannot be fully automated — needs your DB + pgvector)
+# 6. PostgreSQL reminder (cannot be fully automated — needs your DB + pgvector)
 # ---------------------------------------------------------------------------
 cat <<'EOF'
 

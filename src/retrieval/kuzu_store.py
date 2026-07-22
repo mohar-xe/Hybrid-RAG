@@ -86,7 +86,12 @@ def upsert_triplets(triplets: list[Triplet], *, conn=None) -> None:
             MATCH (b:Entity {name: $dst})
             MERGE (a)-[:RELATES_TO {relation_type: $rel, weight: $w}]->(b)
             """,
-            {"src": t.source.title, "dst": t.target.title, "rel": t.relation.type, "w": t.relation.weight},
+            {
+                "src": t.source.title,
+                "dst": t.target.title,
+                "rel": t.relation.type,
+                "w": t.relation.weight,
+            },
         )
     LOGGER.info(f"Upserted {len(triplets)} triplets.")
 
@@ -230,9 +235,9 @@ def get_entity_context(
     # case-insensitive node matching: otherwise case-variant nodes
     # ("X networks" vs "X Networks") would re-expand and emit near-duplicate
     # facts. Display strings keep their original (first-seen) casing.
-    seen_facts: set[str] = set()       # lowercased "subj rel obj" keys
-    visited: set[str] = set()          # lowercased entity names already expanded
-    queued: set[str] = set()           # lowercased names already enqueued
+    seen_facts: set[str] = set()  # lowercased "subj rel obj" keys
+    visited: set[str] = set()  # lowercased entity names already expanded
+    queued: set[str] = set()  # lowercased names already enqueued
     # BFS frontier: seed entities to expand first (de-duplicated case-insensitively,
     # order-preserved, empties dropped). Each hop replaces it with new neighbors.
     frontier: list[str] = []
@@ -267,3 +272,104 @@ def get_entity_context(
         frontier = next_frontier
 
     return "\n".join(facts)
+
+
+def structural_expansion(
+    chunk_ids: list[str],
+    max_hops: int = 2,
+    max_siblings: int = 20,
+    *,
+    conn=None,
+) -> list[tuple[str, str, float]]:
+    """Small-to-big graph expansion (Stage 6).
+
+    For each chunk, traverse: chunk -> MENTIONED_IN entities -> RELATES_TO
+    neighbors -> MENTIONED_IN sibling chunks. Returns deduplicated sibling
+    chunks with their scores (based on relation hop distance).
+
+    Args:
+        chunk_ids: seed chunks (from reranker output).
+        max_hops: how many RELATES_TO edges to follow.
+        max_siblings: max sibling chunks to return.
+
+    Returns:
+        List of ``(chunk_id, text, score)`` for sibling chunks not in the seed
+        set, ordered by proximity score (closer hops = higher score).
+    """
+    if conn is None:
+        _, conn = get_connection()
+
+    # 1. For each seed chunk, find entities mentioned in it.
+    seed_entities: set[str] = set()
+    for cid in chunk_ids:
+        results = conn.execute(
+            "MATCH (e:Entity)-[:MENTIONED_IN]->(c:Chunk) "
+            "WHERE c.chunk_id = $cid "
+            "RETURN DISTINCT e.name",
+            {"cid": cid},
+        )
+        for row in results:
+            seed_entities.add(row[0])
+
+    if not seed_entities:
+        return []
+
+    # 2. Multi-hop expansion over RELATES_TO
+    min_weight = settings.graph.min_relation_weight
+    per_hop = settings.graph.per_hop_neighbors
+
+    expanded_entities: set[str] = set(seed_entities)
+    frontier: list[str] = list(seed_entities)
+    visited: set[str] = set()
+
+    for _hop in range(max(1, max_hops)):
+        if not frontier:
+            break
+        next_frontier: list[str] = []
+        for name in frontier:
+            if name.lower() in visited:
+                continue
+            visited.add(name.lower())
+            for _subj, _rel, _obj, _weight, neighbor in _one_hop_neighbors(
+                conn, name, min_weight, per_hop, both_directions=True
+            ):
+                if neighbor not in expanded_entities:
+                    expanded_entities.add(neighbor)
+                    next_frontier.append(neighbor)
+        frontier = next_frontier
+
+    # 3. Find sibling chunks of all expanded entities, excluding seeds
+    expanded_list = list(expanded_entities)
+    if not expanded_list:
+        return []
+
+    placeholders = ", ".join(f"${i}" for i in range(len(expanded_list)))
+    params = {f"{i}": name for i, name in enumerate(expanded_list)}
+
+    results = conn.execute(
+        f"""
+        MATCH (e:Entity)-[:MENTIONED_IN]->(c:Chunk)
+        WHERE e.name IN [{placeholders}]
+        RETURN c.chunk_id, c.text, c.source_id
+        LIMIT {max_siblings * 2}
+        """,
+        params,
+    )
+
+    seed_set = set(chunk_ids)
+    siblings: list[tuple[str, str, float]] = []
+    seen_siblings: set[str] = set()
+    for row in results:
+        cid = row[0]
+        if cid in seed_set or cid in seen_siblings:
+            continue
+        seen_siblings.add(cid)
+        siblings.append((cid, row[1], 0.5))  # base score for sibling chunks
+
+    LOGGER.info(
+        "Structural expansion: %d seed entities -> %d expanded entities -> %d siblings.",
+        len(seed_entities),
+        len(expanded_entities),
+        len(siblings),
+    )
+    return siblings[:max_siblings]

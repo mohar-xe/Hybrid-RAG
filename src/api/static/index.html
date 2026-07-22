@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hybrid-RAG</title>
+<style>
+:root {
+  --bg: #282828;
+  --bg0: #1d2021;
+  --bg1: #3c3836;
+  --bg2: #504945;
+  --fg: #ebdbb2;
+  --fg0: #fbf1c7;
+  --fg1: #a89984;
+  --red: #cc241d;
+  --green: #98971a;
+  --yellow: #d79921;
+  --blue: #458588;
+  --purple: #b16286;
+  --aqua: #689d6a;
+  --orange: #d65d0e;
+  --gray: #928374;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.5;
+}
+header {
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--bg1);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+}
+header h1 {
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+header h1 span { color: var(--fg1); font-weight: 400; }
+.status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--fg1);
+}
+.status-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--gray);
+}
+.status-dot.ok { background: var(--green); }
+.status-dot.err { background: var(--red); }
+
+.chat {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.chat:empty::after {
+  content: 'Upload a document and ask a question to get started.';
+  color: var(--fg1);
+  font-size: 14px;
+  text-align: center;
+  padding: 48px 0;
+}
+.msg {
+  max-width: 720px;
+  width: 100%;
+  margin: 0 auto;
+}
+.msg.user { text-align: right; }
+.msg.user .bubble {
+  background: var(--blue);
+  color: var(--fg0);
+  display: inline-block;
+  text-align: left;
+  border-radius: 12px 12px 4px 12px;
+}
+.msg.assistant .bubble {
+  background: var(--bg1);
+  border-radius: 12px 12px 12px 4px;
+}
+.msg.system .bubble {
+  background: var(--bg0);
+  border: 1px solid var(--bg2);
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--fg1);
+}
+.bubble {
+  padding: 12px 16px;
+  font-size: 14px;
+  line-height: 1.6;
+  max-width: 100%;
+  word-wrap: break-word;
+}
+.bubble pre {
+  background: var(--bg0);
+  padding: 12px;
+  border-radius: 6px;
+  overflow-x: auto;
+  font-size: 13px;
+  margin: 8px 0;
+}
+.bubble code {
+  background: var(--bg0);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 13px;
+}
+.bubble a { color: var(--blue); text-decoration: underline; }
+.bubble .ref { color: var(--aqua); font-size: 12px; }
+.pulse { animation: pulse 1.5s ease-in-out infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+.input-area {
+  flex-shrink: 0;
+  border-top: 1px solid var(--bg1);
+  padding: 16px 24px;
+}
+.upload-bar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+  align-items: center;
+}
+.upload-bar label {
+  background: var(--bg1);
+  border: 1px dashed var(--bg2);
+  border-radius: 8px;
+  padding: 8px 16px;
+  font-size: 13px;
+  cursor: pointer;
+  color: var(--fg1);
+  transition: border-color .15s, background .15s;
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.upload-bar label:hover { border-color: var(--blue); background: var(--bg2); }
+.upload-bar input[type="file"] { display: none; }
+.upload-bar .file-name { font-size: 13px; color: var(--fg1); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.upload-bar .task-status { font-size: 12px; color: var(--yellow); }
+.btn {
+  background: var(--bg1);
+  border: none;
+  color: var(--fg);
+  padding: 8px 20px;
+  border-radius: 8px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background .15s;
+  white-space: nowrap;
+}
+.btn:hover { background: var(--bg2); }
+.btn.primary { background: var(--blue); color: var(--fg0); }
+.btn.primary:hover { background: #3c7e8a; }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn.sm { padding: 6px 14px; font-size: 13px; }
+
+.query-row {
+  display: flex;
+  gap: 8px;
+}
+.query-row input {
+  flex: 1;
+  background: var(--bg1);
+  border: 1px solid var(--bg2);
+  border-radius: 8px;
+  padding: 10px 16px;
+  font-size: 14px;
+  color: var(--fg);
+  outline: none;
+  transition: border-color .15s;
+}
+.query-row input:focus { border-color: var(--blue); }
+.query-row input::placeholder { color: var(--fg1); }
+
+.toast {
+  position: fixed;
+  bottom: 100px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--bg0);
+  border: 1px solid var(--bg2);
+  padding: 10px 20px;
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--fg1);
+  opacity: 0;
+  transition: opacity .3s;
+  pointer-events: none;
+  z-index: 100;
+}
+.toast.show { opacity: 1; }
+
+@media (max-width: 600px) {
+  header { padding: 12px 16px; }
+  header h1 { font-size: 16px; }
+  .chat { padding: 16px; }
+  .input-area { padding: 12px 16px; }
+  .upload-bar { flex-wrap: wrap; }
+  .upload-bar label { flex: auto; }
+}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Hybrid-RAG <span>retrieval engine</span></h1>
+  <div class="status">
+    <span class="status-dot" id="healthDot"></span>
+    <span id="healthText">checking...</span>
+  </div>
+</header>
+
+<div class="chat" id="chat"></div>
+
+<div class="input-area">
+  <div class="upload-bar">
+    <label for="fileInput" id="fileLabel">+ Upload PDF</label>
+    <input type="file" id="fileInput" accept=".pdf">
+    <span class="file-name" id="fileName"></span>
+    <span class="task-status" id="taskStatus"></span>
+    <button class="btn sm" id="ingestBtn" disabled>Ingest</button>
+  </div>
+  <div class="query-row">
+    <input type="text" id="queryInput" placeholder="Ask a question about your documents..." autocomplete="off">
+    <button class="btn primary" id="askBtn" disabled>Ask</button>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const API = window.location.origin;
+let apiKey = '';
+let taskId = '';
+let polling = false;
+
+const $ = s => document.querySelector(s);
+const chat = $('#chat');
+const healthDot = $('#healthDot');
+const healthText = $('#healthText');
+const fileInput = $('#fileInput');
+const fileName = $('#fileName');
+const taskStatus = $('#taskStatus');
+const ingestBtn = $('#ingestBtn');
+const queryInput = $('#queryInput');
+const askBtn = $('#askBtn');
+
+async function checkHealth() {
+  try {
+    const r = await fetch(`${API}/health`);
+    const d = await r.json();
+    healthDot.className = 'status-dot ' + (d.status === 'healthy' ? 'ok' : 'err');
+    healthText.textContent = d.status === 'healthy' ? 'Online' : 'Degraded';
+    return true;
+  } catch {
+    healthDot.className = 'status-dot err';
+    healthText.textContent = 'Offline';
+    return false;
+  }
+}
+
+function key() {
+  const k = sessionStorage.getItem('api_key');
+  return k || '';
+}
+
+function setKey(k) { sessionStorage.setItem('api_key', k); }
+async function api(method, path, body) {
+  const headers = {};
+  const k = key();
+  if (k) headers['X-API-Key'] = k;
+  if (body && !(body instanceof FormData)) {
+    headers['Content-Type'] = 'application/json';
+    body = JSON.stringify(body);
+  }
+  const r = await fetch(`${API}${path}`, { method, headers, body });
+  return r;
+}
+
+function addMsg(role, html) {
+  const d = document.createElement('div');
+  d.className = 'msg ' + role;
+  d.innerHTML = '<div class="bubble">' + html + '</div>';
+  chat.appendChild(d);
+  d.scrollIntoView({ behavior: 'smooth' });
+}
+
+function addThinking() {
+  const d = document.createElement('div');
+  d.className = 'msg assistant';
+  d.id = 'thinking';
+  d.innerHTML = '<div class="bubble pulse">Thinking...</div>';
+  chat.appendChild(d);
+  d.scrollIntoView({ behavior: 'smooth' });
+}
+
+function removeThinking() {
+  const t = $('#thinking');
+  if (t) t.remove();
+}
+
+function toast(msg) {
+  const t = $('#toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+async function pollTask() {
+  if (!taskId || polling) return;
+  polling = true;
+  for (let i = 0; i < 120; i++) {
+    try {
+      const r = await api('GET', `/ingest/${taskId}`);
+      const d = await r.json();
+      if (d.status === 'completed') {
+        taskStatus.textContent = `✓ ${d.chunks || 0} chunks indexed`;
+        taskStatus.style.color = 'var(--green)';
+        ingestBtn.disabled = false;
+        ingestBtn.textContent = 'Ingest';
+        askBtn.disabled = false;
+        addMsg('system', `Ingested ${d.chunks || 0} chunks (${d.failed_extractions || 0} extraction failures). Ready to query.`);
+        polling = false;
+        return;
+      }
+      if (d.status === 'failed') {
+        taskStatus.textContent = '✗ Failed';
+        taskStatus.style.color = 'var(--red)';
+        ingestBtn.disabled = false;
+        ingestBtn.textContent = 'Ingest';
+        addMsg('system', `Ingestion failed: ${d.error || 'unknown error'}`);
+        polling = false;
+        return;
+      }
+      taskStatus.textContent = d.status;
+    } catch { /* retry */ }
+    await new Promise(r => setTimeout(r, 2000));
+  }
+  taskStatus.textContent = 'timeout';
+  ingestBtn.disabled = false;
+  ingestBtn.textContent = 'Ingest';
+  polling = false;
+}
+
+fileInput.addEventListener('change', () => {
+  const f = fileInput.files[0];
+  if (!f) { fileName.textContent = ''; ingestBtn.disabled = true; return; }
+  fileName.textContent = f.name;
+  ingestBtn.disabled = false;
+});
+
+ingestBtn.addEventListener('click', async () => {
+  const f = fileInput.files[0];
+  if (!f) return;
+  ingestBtn.disabled = true;
+  ingestBtn.textContent = 'Uploading...';
+  taskStatus.textContent = 'uploading';
+  taskStatus.style.color = 'var(--yellow)';
+
+  const fd = new FormData();
+  fd.append('file', f);
+  if (key()) fd.append('api_key', key());
+
+  try {
+    const r = await api('POST', '/ingest/upload', fd);
+    const d = await r.json();
+    taskId = d.task_id;
+    taskStatus.textContent = 'queued';
+    addMsg('system', `Uploaded ${f.name}. Ingesting...`);
+    pollTask();
+  } catch (e) {
+    taskStatus.textContent = '✗ Error';
+    taskStatus.style.color = 'var(--red)';
+    ingestBtn.disabled = false;
+    ingestBtn.textContent = 'Ingest';
+    toast('Upload failed: ' + e.message);
+  }
+});
+
+queryInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !askBtn.disabled) askBtn.click();
+});
+
+askBtn.addEventListener('click', async () => {
+  const q = queryInput.value.trim();
+  if (!q) return;
+  queryInput.value = '';
+  addMsg('user', q);
+  addThinking();
+
+  try {
+    const r = await api('POST', '/query', { question: q, top_k: 5 });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      removeThinking();
+      addMsg('system', `Error: ${err.detail || r.statusText}`);
+      return;
+    }
+    const d = await r.json();
+    removeThinking();
+
+    let html = d.answer.replace(/\n/g, '<br>');
+    if (d.citations && d.citations.length) {
+      html += '<br><br><div class="ref">Sources: ' + d.citations.map(c =>
+        `[${c.ref}] ${c.source.split('/').pop() || c.source}`
+      ).join(', ') + '</div>';
+    }
+    if (d.faithfulness != null) {
+      html += `<div class="ref">Faithfulness: ${(d.faithfulness * 100).toFixed(0)}%</div>`;
+    }
+    addMsg('assistant', html);
+  } catch (e) {
+    removeThinking();
+    addMsg('system', 'Request failed: ' + e.message);
+  }
+});
+
+async function init() {
+  const ok = await checkHealth();
+
+  const k = sessionStorage.getItem('api_key');
+  if (!k) {
+    const input = prompt('Enter API key (leave blank if none configured):');
+    if (input) setKey(input);
+  }
+
+  if (ok) askBtn.disabled = false;
+  setInterval(checkHealth, 30000);
+}
+
+init();
+</script>
+</body>
+</html>

@@ -16,8 +16,18 @@ from pathlib import Path
 
 import httpx
 import psycopg
-from fastapi import FastAPI, BackgroundTasks, Depends, Header, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import (
+    FastAPI,
+    BackgroundTasks,
+    Depends,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    UploadFile,
+)
+from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from config.settings import get_settings
@@ -55,6 +65,16 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan, title="Hybrid-RAG", version="0.1.0")
+
+
+# ── Static frontend ──────────────────────────────────────────────────────
+_STATIC = Path(__file__).parent / "static"
+if _STATIC.exists():
+    app.mount("/static", StaticFiles(directory=str(_STATIC)), name="static")
+
+    @app.get("/", include_in_schema=False)
+    async def index():
+        return HTMLResponse((_STATIC / "index.html").read_text())
 
 
 def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
@@ -103,70 +123,153 @@ class QueryResponse(BaseModel):
     faithfulness: float | None = None
 
 
-def _run_ingestion(task_id: str, file_path: str, source_type: str, extractor: str | None = None):
+def _run_ingestion(
+    task_id: str,
+    file_path: str,
+    source_type: str,
+    extractor: str | None = None,
+    version_label: str | None = None,
+    supersedes: str | None = None,
+):
     from ingestion.extractor import Extractor
     from ingestion.chunker import chunk_text, chunk_enrich
+    from ingestion.document_cluster import (
+        extract_document_metadata,
+        create_document_cluster,
+    )
     from retrieval.pgvector import store_chunks
-    from retrieval.kuzu_store import get_connection, init_graph_schema, upsert_triplets, link_entities_to_chunk
+    from retrieval.kuzu_store import (
+        get_connection,
+        init_graph_schema,
+        upsert_triplets,
+        link_entities_to_chunk,
+    )
     from graph.entity_extraction import extract_entities_batch
+
+    import uuid as _uuid
 
     _tasks[task_id]["status"] = "processing"
     try:
         ext = Extractor()
-        if source_type == "pdf":
-            text = ext.extract_pdf(file_path)
-        elif source_type == "youtube":
-            text = ext.yt_subtitle_extraction(file_path)
-        else:
-            text = ext.reel_subtitle_extraction(file_path)
+        text = ext.extract_pdf(file_path)
 
-        chunks = chunk_enrich(chunk_text(text), source_type.upper(), file_path)
+        # Document metadata extraction
+        metadata = extract_document_metadata(text, source_id=file_path)
+        is_versioned = bool(version_label or supersedes)
+        doc_id = str(_uuid.uuid4())
+        create_document_cluster(
+            doc_id,
+            file_path,
+            source_type.upper(),
+            metadata,
+            text,
+            supersedes_doc_id=supersedes,
+            is_versioned=is_versioned,
+            version_label=version_label,
+        )
+
+        chunks = chunk_enrich(
+            chunk_text(text), source_type.upper(), file_path, doc_id=doc_id
+        )
         store_chunks(chunks)
 
-        # Extract triplets concurrently (I/O-bound), then write to Kùzu serially
-        # under the process-wide lock (the connection is not thread-safe and
-        # Kùzu permits a single writer).
-        triplets_list = extract_entities_batch([c.text for c in chunks], backend=extractor)
+        triplets_list = extract_entities_batch(
+            [c.text for c in chunks], backend=extractor
+        )
         failed = 0
         with _GRAPH_WRITE_LOCK:
             graph_db, graph_conn = get_connection()
             init_graph_schema(conn=graph_conn)
             for chunk, triplets in zip(chunks, triplets_list):
-                if triplets is None:  # extraction errored for this chunk
+                if triplets is None:
                     failed += 1
                     continue
                 upsert_triplets(triplets, conn=graph_conn)
-                entity_names = list({t.source.title for t in triplets} | {t.target.title for t in triplets})
+                entity_names = list(
+                    {t.source.title for t in triplets}
+                    | {t.target.title for t in triplets}
+                )
                 link_entities_to_chunk(
-                    entity_names, str(chunk.chunk_id), text=chunk.text,
-                    source_id=chunk.source_id, conn=graph_conn,
+                    entity_names,
+                    str(chunk.chunk_id),
+                    text=chunk.text,
+                    source_id=chunk.source_id,
+                    conn=graph_conn,
                 )
 
-        _tasks[task_id].update({"status": "completed", "chunks": len(chunks), "failed_extractions": failed})
+        _tasks[task_id].update(
+            {"status": "completed", "chunks": len(chunks), "failed_extractions": failed}
+        )
     except Exception as e:
         _tasks[task_id].update({"status": "failed", "error": str(e)})
         LOGGER.error(f"Ingestion failed: {e}")
 
 
+class IngestRequest(BaseModel):
+    file_path: str
+    source_type: str = "pdf"
+    extractor: str | None = None
+    version_label: str | None = None
+    supersedes: str | None = None
+
+
 @app.post("/ingest", dependencies=[Depends(require_api_key)])
 async def ingest(
-    file_path: str,
-    source_type: str = "pdf",
-    extractor: str | None = None,
+    req: IngestRequest,
     background_tasks: BackgroundTasks = None,
 ):
-    if source_type not in ("pdf", "youtube", "audio"):
-        raise HTTPException(status_code=400, detail=f"Unknown source_type: {source_type}")
+    if req.source_type != "pdf":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported source_type: {req.source_type} (only pdf is supported)",
+        )
 
-    # File-based sources must live inside the allow-listed directory. YouTube
-    # takes a video id (not a path), so it is exempt from path validation.
-    if source_type in ("pdf", "audio"):
-        file_path = _validate_ingest_path(file_path)
+    file_path = _validate_ingest_path(file_path)
 
     task_id = str(uuid.uuid4())
     _tasks[task_id] = {"status": "accepted"}
-    background_tasks.add_task(_run_ingestion, task_id, file_path, source_type, extractor)
+    background_tasks.add_task(
+        _run_ingestion,
+        task_id,
+        file_path,
+        req.source_type,
+        req.extractor,
+        req.version_label,
+        req.supersedes,
+    )
     return {"task_id": task_id, "status": "accepted"}
+
+
+@app.post("/ingest/upload", dependencies=[Depends(require_api_key)])
+async def ingest_upload(
+    file: UploadFile = File(...),
+    background_tasks: BackgroundTasks = None,
+    extractor: str | None = Form(default=None),
+    version_label: str | None = Form(default=None),
+    supersedes: str | None = Form(default=None),
+):
+    if not file.filename or not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(400, "Only PDF files are supported")
+
+    tmp_dir = Path("/tmp") / "hybrid_rag_ingest"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    tmp_path = tmp_dir / file.filename
+
+    content = await file.read()
+    tmp_path.write_bytes(content)
+
+    task_id = str(uuid.uuid4())
+    _tasks[task_id] = {"status": "accepted", "filename": file.filename}
+    background_tasks.add_task(
+        _run_ingestion,
+        task_id,
+        str(tmp_path),
+        "pdf",
+        extractor,
+        version_label,
+        supersedes,
+    )
+    return {"task_id": task_id, "status": "accepted", "filename": file.filename}
 
 
 @app.get("/ingest/{task_id}", dependencies=[Depends(require_api_key)])
@@ -179,26 +282,55 @@ async def ingest_status(task_id: str):
 @app.post("/query", response_model=None, dependencies=[Depends(require_api_key)])
 async def query(req: QueryRequest):
     from reasoning.router import route_retrieval
-    from retrieval.pgvector import cluster_routed_search
-    from retrieval.kuzu_store import get_entity_context
+    from reasoning.query_interpreter import interpret_query
+    from retrieval.pgvector import (
+        hard_filter_docs,
+        doc_level_soft_rank,
+        document_routed_search,
+    )
+    from retrieval.kuzu_store import get_entity_context, structural_expansion
     from retrieval.reranker import rerank
     from context.builder import build_context
     from llm.generator import generate
     from embeddings.embedder import embedder
 
+    # 0: route & interpret
     strategy = route_retrieval(req.question)
+    interpreted = interpret_query(req.question)
+    semantic_query = interpreted.get("semantic_query", req.question)
+    filters = interpreted.get("filters", {})
 
-    emb = embedder([req.question])[0]
-    chunks = cluster_routed_search(emb)
+    query_emb = embedder([semantic_query])[0]
+
+    # 1: hard filter
+    doc_ids = hard_filter_docs(
+        doc_type=filters.get("doc_type"),
+        is_latest=filters.get("is_latest"),
+        date_after=filters.get("date_after"),
+    )
+
+    # 2: doc-level soft ranking
+    ranked_docs = doc_level_soft_rank(query_emb, semantic_query, doc_ids)
+    if ranked_docs:
+        doc_ids = [d[0] for d in ranked_docs]
+        doc_rank_map = {d[0]: i + 1 for i, d in enumerate(ranked_docs)}
+    else:
+        doc_rank_map = None
+
+    # 3-4: chunk-level hybrid search + cross-list RRF fusion
+    chunks = document_routed_search(
+        query_emb, semantic_query, doc_ids, doc_rank_map=doc_rank_map
+    )
 
     if not chunks:
         raise HTTPException(404, "No relevant context found")
 
-    # Stage 4: rerank routed candidates to the requested top-k.
-    chunks = rerank(req.question, chunks, top_k=req.top_k)
+    # 5: rerank
+    chunks = rerank(semantic_query, chunks, top_k=req.top_k)
 
+    # 6-7: graph
     graph_facts = ""
-    if strategy["use_graph"]:
+    if strategy.get("use_graph", False):
         from graph.entity_extraction import extract_query_entities
 
         entities = extract_query_entities(req.question)
@@ -207,8 +339,6 @@ async def query(req: QueryRequest):
 
     context, citations = build_context(chunks, graph_facts)
 
-    # Streaming: emit the answer tokens as they arrive (citations/faithfulness
-    # are omitted from the stream — clients needing them should set stream=false).
     if req.stream:
         return StreamingResponse(
             generate(req.question, context, stream=True), media_type="text/plain"
@@ -216,19 +346,21 @@ async def query(req: QueryRequest):
 
     answer = generate(req.question, context)
 
-    # Optional gated faithfulness check (VERIFIER__ENABLED).
     faithfulness = None
     if settings.verifier.enabled and context:
         try:
             from verification.verifier import score_faithfulness
 
             faithfulness = score_faithfulness(answer, context)
-        except Exception as e:  # never let verification break a response
+        except Exception as e:
             LOGGER.warning(f"Faithfulness scoring failed: {e}")
 
     return QueryResponse(
         answer=answer,
-        citations=[{"ref": c.ref_id, "source": c.source_id, "preview": c.text_preview} for c in citations],
+        citations=[
+            {"ref": c.ref_id, "source": c.source_id, "preview": c.text_preview}
+            for c in citations
+        ],
         faithfulness=faithfulness,
     )
 

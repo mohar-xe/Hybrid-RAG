@@ -5,36 +5,47 @@ description = "A fullfledged Hybrid Graph RAG"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "ipykernel>=7.2.0",
-    "ollama>=0.6.2",
+    # Core: required for API-first mode (remote providers)
+    "httpx>=0.27.0",
     "pydantic-settings>=2.14.1",
-    "pymupdf>=1.27.2.3",
-    "pywhispercpp>=1.4.1",
-    "youtube-transcript-api>=1.2.4",
-    "yt-dlp>=2026.3.17",
-    "psycopg[binary]>=3.2.0",
-    "yake>=0.7.3",
-    # retrieval & graph
-    "kuzu==0.11.3",
-    "sentence-transformers>=5.4.0",
+    "typer>=0.12.0",
     "numpy>=1.26.0",
-    # API & CLI
+    # Database
+    "psycopg[binary]>=3.2.0",
+    # Graph store
+    "kuzu==0.11.3",
+    # Ingestion
+    "pymupdf>=1.27.2.3",
+    # Keyphrase extraction (query-time)
+    "yake>=0.7.3",
+    # ANN search
+    "hnswlib==0.8.0",
+    # API server
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.30.0",
-    "httpx>=0.27.0",
-    "typer>=0.12.0",
-    "hnswlib==0.8.0",
-    "gradio>=5.0.0",
-    "einops>=0.8.2",
 ]
 
 [project.optional-dependencies]
-# Offline evaluation harness (see /evaluation). Kept out of the core install
-# because it is only needed to run the HotpotQA benchmark, not to serve the app.
+# Local/Ollama models (add for offline mode or fallback)
+local = [
+    "ollama>=0.6.2",
+    "sentence-transformers>=5.4.0",
+    "einops>=0.8.2",
+    "spacy>=3.8.0",
+]
+# Demo UI (Gradio)
+demo = [
+    "gradio>=5.0.0",
+]
+# Notebook support
+notebook = [
+    "ipykernel>=7.2.0",
+]
+# Offline evaluation harness
 eval = [
     "datasets>=2.18.0",
 ]
-# Test tooling for the evaluation harness unit tests.
+# Test tooling
 dev = [
     "pytest>=8.0",
 ]
@@ -44,7 +55,5 @@ requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [tool.pytest.ini_options]
-# Put the repo root on sys.path so `import evaluation` resolves; the editable
-# install already exposes the src-layout packages (config/retrieval/...).
 pythonpath = ["."]
 testpaths = ["evaluation/tests"]

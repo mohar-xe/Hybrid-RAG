@@ -9,6 +9,7 @@ Two interchangeable backends are available; choose one per call / CLI run:
 
 ``extract_entities(text, backend=...)`` dispatches between them. When ``backend``
 is omitted it falls back to ``EXTRACTION__BACKEND`` (default: ``deepseek``).
+If the primary backend fails, the other backend is tried as a fallback.
 """
 
 import json
@@ -20,13 +21,16 @@ from graph.schema import Triplet, VALID_RELATION_TYPES
 from config.settings import ExtractionSettings, NERSettings
 from constants.exceptions import ConfigurationError
 from constants.logger import setup_logger
+from models.fallback import with_fallback
+from models.rate_limiter import GEMINI_LIMITER
 
 LOGGER = setup_logger(__name__)
 
-extraction = ExtractionSettings()   # local (Ollama) backend config
-ner = NERSettings()                 # remote (DeepSeek / OpenAI-compatible) backend config
+extraction = ExtractionSettings()  # local (Ollama) backend config
+ner = NERSettings()  # remote (DeepSeek / OpenAI-compatible) backend config
 
 _RELATION_LIST = ", ".join(sorted(VALID_RELATION_TYPES))
+
 
 def _build_system_prompt(min_triplets: int, max_triplets: int) -> str:
     """Build the extraction system prompt for the given triplet-count bounds."""
@@ -58,7 +62,12 @@ def _parse_json(content: str) -> list[dict]:
     """
     content = content.strip()
     if content.startswith("```"):
-        content = content.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        content = (
+            content.removeprefix("```json")
+            .removeprefix("```")
+            .removesuffix("```")
+            .strip()
+        )
 
     if not content:
         # Empty model response -> no triplets (not an error).
@@ -113,7 +122,12 @@ def extract_entities_local(text: str) -> list[Triplet]:
         json={
             "model": extraction.model,
             "messages": [
-                {"role": "system", "content": _build_system_prompt(extraction.min_triplets, extraction.max_triplets)},
+                {
+                    "role": "system",
+                    "content": _build_system_prompt(
+                        extraction.min_triplets, extraction.max_triplets
+                    ),
+                },
                 {"role": "user", "content": f"Passage:\n{text}"},
             ],
             "stream": False,
@@ -142,16 +156,17 @@ def extract_entities_api(text: str) -> list[Triplet]:
     payload = {
         "model": ner.model,
         "messages": [
-            {"role": "system", "content": _build_system_prompt(ner.min_triplets, ner.max_triplets)},
+            {
+                "role": "system",
+                "content": _build_system_prompt(ner.min_triplets, ner.max_triplets),
+            },
             {"role": "user", "content": f"Passage:\n{text}"},
         ],
         "temperature": ner.temperature,
-        "max_tokens": 1024,
+        "max_tokens": 32768,
         "stream": False,
     }
-    if ner.disable_thinking:
-        # DeepSeek hybrid models default to reasoning; disabling it keeps the
-        # token budget for the actual JSON answer and cuts latency.
+    if ner.disable_thinking and "deepseek" in ner.model.lower():
         payload["thinking"] = {"type": "disabled"}
 
     response = httpx.post(
@@ -164,7 +179,7 @@ def extract_entities_api(text: str) -> list[Triplet]:
     content = response.json()["choices"][0]["message"]["content"]
 
     triplets = validate_triplets(_parse_json(content))
-    LOGGER.info(f"Extracted {len(triplets)} triplets (deepseek/{ner.model}).")
+    LOGGER.info(f"Extracted {len(triplets)} triplets (api/{ner.model}).")
     return triplets
 
 
@@ -176,8 +191,37 @@ _BACKENDS = {
 }
 
 
+def _fallback_dispatcher(text: str, backend: str | None = None) -> list[Triplet]:
+    """Run extraction with the configured primary backend, falling back to the other.
+
+    On failure the primary backend is tried first; if it fails and fallback is
+    enabled, the other backend is tried as a transparent fallback.
+    """
+    name = (backend or extraction.backend).lower()
+    if name not in _BACKENDS:
+        raise ConfigurationError(
+            f"Unknown extraction backend: {backend!r}. Choose 'local' or 'deepseek'."
+        )
+
+    primary_fn = _BACKENDS[name]
+    fallback_name = "local" if name in ("deepseek", "api") else "deepseek"
+    fallback_fn = _BACKENDS.get(fallback_name)
+    fallback_enabled = extraction.fallback_enabled and ner.fallback_enabled
+
+    result, _tag = with_fallback(
+        primary_fn,
+        fallback_fn,
+        "kg_extraction",
+        fallback_enabled=fallback_enabled,
+        primary_tag=name,
+        fallback_tag=fallback_name,
+        text=text,
+    )
+    return result
+
+
 def extract_entities(text: str, backend: str | None = None) -> list[Triplet]:
-    """Extract triplets using the selected backend.
+    """Extract triplets using the selected backend with automatic fallback.
 
     Args:
         text: passage to extract triplets from.
@@ -188,13 +232,7 @@ def extract_entities(text: str, backend: str | None = None) -> list[Triplet]:
         ConfigurationError: if ``backend`` is unknown, or the ``deepseek``
             backend is chosen without ``NER__API_KEY`` set.
     """
-    name = (backend or extraction.backend).lower()
-    fn = _BACKENDS.get(name)
-    if fn is None:
-        raise ConfigurationError(
-            f"Unknown extraction backend: {backend!r}. Choose 'local' or 'deepseek'."
-        )
-    return fn(text)
+    return _fallback_dispatcher(text, backend)
 
 
 def _resolve_concurrency(backend_name: str) -> int:
@@ -204,25 +242,171 @@ def _resolve_concurrency(backend_name: str) -> int:
     return extraction.concurrency
 
 
+def _extract_bundled_prompt(texts: list[str], start_idx: int) -> tuple[str, str]:
+    """Build a system + user prompt for bundled extraction of multiple texts.
+
+    Each text is separated by a ``---CHUNK N---`` marker. The model is instructed
+    to return a JSON object mapping chunk numbers to triplet arrays.
+    """
+    sep = "\n\n---CHUNK %d---\n\n"
+    parts = []
+    for i, t in enumerate(texts):
+        parts.append(f"Passage {start_idx + i}:\n{t}")
+    combined = "\n\n".join(parts)
+
+    system = _build_system_prompt(ner.min_triplets, ner.max_triplets)
+    system += (
+        "\n\nExtract triplets from EACH passage. Passages are numbered above."
+        "\nOutput a JSON object where keys are passage indices (as strings: "
+        '"0", "1", ...) and values are arrays of triplets for that passage. '
+        "Output ONLY the JSON object, no prose, no markdown."
+    )
+    return system, combined
+
+
+def _parse_bundled_response(
+    content: str,
+    batch_size: int,
+    start_idx: int,
+) -> list[list[Triplet]]:
+    """Parse a bundled model response into per-chunk triplet lists.
+
+    Expects ``{"0": [...], "1": [...], ...}`` or a flat array of triplets
+    (non-bundled fallback). Uses raw JSON parsing (not ``_parse_json`` which
+    wraps non-array values in a list).
+    """
+    content = content.strip()
+    if content.startswith("```"):
+        content = (
+            content.removeprefix("```json")
+            .removeprefix("```")
+            .removesuffix("```")
+            .strip()
+        )
+
+    if not content:
+        return [[] for _ in range(batch_size)]
+
+    try:
+        raw = json.loads(content)
+    except json.JSONDecodeError as exc:
+        LOGGER.warning("Failed to parse bundled response JSON: %s", exc)
+        return [[] for _ in range(batch_size)]
+
+    # Dict: key=chunk_index str, value=list of triplet dicts
+    if isinstance(raw, dict):
+        result = [[] for _ in range(batch_size)]
+        for key, items in raw.items():
+            try:
+                idx = int(key) - start_idx
+            except (ValueError, TypeError):
+                continue
+            if 0 <= idx < batch_size and isinstance(items, list):
+                result[idx] = validate_triplets(items)
+        return result
+
+    # Flat array: assign all triplets to the first chunk (non-bundled fallback)
+    if isinstance(raw, list):
+        triplets = validate_triplets(raw)
+        result = [[] for _ in range(batch_size)]
+        if triplets:
+            result[0] = triplets
+        return result
+
+    LOGGER.warning(
+        "Unexpected bundled response type %s; treating as empty.",
+        type(raw).__name__,
+    )
+    return [[] for _ in range(batch_size)]
+
+
+def _extract_entities_gemini_batch(
+    texts: list[str],
+) -> list[list[Triplet] | None]:
+    """Extract triplets via Gemini API, bundling chunks per API call.
+
+    Groups texts into batches of ``ner.batch_size`` (default 30), sends one
+    API call per batch with a combined prompt, and rate-limits to 5 RPM.
+    """
+    if not texts:
+        return []
+
+    batch_size = ner.batch_size
+    results: list[list[Triplet] | None] = [None] * len(texts)
+
+    for batch_start in range(0, len(texts), batch_size):
+        batch = texts[batch_start : batch_start + batch_size]
+
+        GEMINI_LIMITER.acquire()
+
+        system, combined = _extract_bundled_prompt(batch, batch_start)
+
+        api_key = ner.api_key.get_secret_value()
+        if not api_key:
+            LOGGER.warning("NER__API_KEY not set; skipping bundled extraction.")
+            for j in range(len(batch)):
+                results[batch_start + j] = []
+            continue
+
+        payload = {
+            "model": ner.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": combined},
+            ],
+            "temperature": ner.temperature,
+            "max_tokens": 32768,
+            "stream": False,
+        }
+        if ner.disable_thinking and "deepseek" in ner.model.lower():
+            payload["thinking"] = {"type": "disabled"}
+
+        try:
+            response = httpx.post(
+                f"{ner.base_url.rstrip('/')}/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json=payload,
+                timeout=ner.timeout,
+            )
+            response.raise_for_status()
+            content = response.json()["choices"][0]["message"]["content"]
+
+            per_chunk = _parse_bundled_response(content, len(batch), batch_start)
+            for j, triplets in enumerate(per_chunk):
+                results[batch_start + j] = triplets
+            LOGGER.info(
+                "NER batch %d-%d: extracted %d triplets across %d chunks.",
+                batch_start,
+                batch_start + len(batch) - 1,
+                sum(len(t) for t in per_chunk),
+                len(batch),
+            )
+        except Exception as exc:
+            LOGGER.warning(
+                "Gemini batch extraction failed for batch %d: %s", batch_start, exc
+            )
+            for j in range(len(batch)):
+                results[batch_start + j] = []
+
+    return results
+
+
 def extract_entities_batch(
     texts: list[str],
     backend: str | None = None,
     max_workers: int | None = None,
 ) -> list[list[Triplet] | None]:
-    """Extract triplets for many texts concurrently (the calls are I/O-bound).
+    """Extract triplets for many texts.
+
+    When the backend is ``"deepseek"``/``"api"`` and ``NER__BATCH_SIZE > 1``,
+    texts are bundled and sent to Gemini (rate-limited, 5 RPM). Otherwise the
+    original per-chunk concurrent path is used.
 
     Returns one entry per input text, in the **same order**:
     * ``list[Triplet]`` (possibly empty) on success,
     * ``None`` if that text's extraction raised (transient API/network error or
       bad response) — the caller can count/skip these without aborting the run.
-
-    Concurrency defaults to the backend's configured value
-    (``NER__CONCURRENCY`` for ``deepseek``, ``EXTRACTION__CONCURRENCY`` for
-    ``local``). Kùzu writes are NOT done here — do them serially in the caller,
-    since a Kùzu connection is not thread-safe.
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
     if not texts:
         return []
 
@@ -231,6 +415,13 @@ def extract_entities_batch(
         raise ConfigurationError(
             f"Unknown extraction backend: {backend!r}. Choose 'local' or 'deepseek'."
         )
+
+    # Use the bundled Gemini path when batch_size > 1 and backend is API.
+    if name in ("deepseek", "api") and ner.batch_size > 1:
+        return _extract_entities_gemini_batch(texts)
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     workers = max_workers or _resolve_concurrency(name)
     workers = max(1, min(workers, len(texts)))
 
@@ -320,7 +511,12 @@ def _parse_string_array(content: str) -> list[str]:
     """
     content = (content or "").strip()
     if content.startswith("```"):
-        content = content.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        content = (
+            content.removeprefix("```json")
+            .removeprefix("```")
+            .removesuffix("```")
+            .strip()
+        )
     if not content:
         return []
     try:
@@ -332,23 +528,18 @@ def _parse_string_array(content: str) -> list[str]:
         data = next((v for v in data.values() if isinstance(v, list)), [])
     if not isinstance(data, list):
         return []
-    return _dedupe_preserve([item.strip() for item in data if isinstance(item, str) and item.strip()])
+    return _dedupe_preserve(
+        [item.strip() for item in data if isinstance(item, str) and item.strip()]
+    )
 
 
-def extract_query_entities_llm(query: str) -> list[str]:
-    """LLM fallback NER for a query: return entity/concept surface strings.
-
-    Uses the remote OpenAI-compatible endpoint (``NER__*``, default DeepSeek) —
-    a general model with a query-focused NER prompt, which recovers entities
-    better than keyphrase statistics when YAKE comes up empty. Raises
-    ``ConfigurationError`` if the API key is unset (the hybrid wrapper catches
-    it and degrades to no seeds).
-    """
+def _extract_query_entities_api(query: str) -> list[str]:
+    """Remote API query-entity extraction (DeepSeek / OpenAI-compatible)."""
     api_key = ner.api_key.get_secret_value()
     if not api_key:
         raise ConfigurationError(
             "NER API key is not set. Add NER__API_KEY to your .env to use the "
-            "LLM query-entity fallback (the 'deepseek' backend)."
+            "'deepseek' query-entity extraction backend."
         )
 
     system = (
@@ -366,12 +557,10 @@ def extract_query_entities_llm(query: str) -> list[str]:
             {"role": "user", "content": query},
         ],
         "temperature": ner.temperature,
-        "max_tokens": 256,
+        "max_tokens": 32768,
         "stream": False,
     }
-    if ner.disable_thinking:
-        # DeepSeek hybrid models default to reasoning; disabling it keeps the
-        # token budget for the JSON answer and cuts latency.
+    if ner.disable_thinking and "deepseek" in ner.model.lower():
         payload["thinking"] = {"type": "disabled"}
 
     response = httpx.post(
@@ -384,8 +573,59 @@ def extract_query_entities_llm(query: str) -> list[str]:
     content = response.json()["choices"][0]["message"]["content"]
 
     entities = _parse_string_array(content)
-    LOGGER.info(f"LLM query NER extracted {len(entities)} entities (deepseek/{ner.model}).")
+    LOGGER.info(f"LLM query NER extracted {len(entities)} entities (api/{ner.model}).")
     return entities
+
+
+def _extract_query_entities_ollama(query: str) -> list[str]:
+    """Local Ollama query-entity extraction using the fine-tuned model."""
+    system = (
+        "You extract the named entities and salient noun-phrase concepts from a "
+        "search question — the things a knowledge graph would index (people, "
+        "organizations, places, works, systems, models, theories, events, "
+        "methods). Return ONLY a JSON array of the entity surface strings exactly "
+        'as a graph would store them (e.g. ["Albert Einstein", "Nobel Prize"]). '
+        "No prose, no markdown, no objects, no duplicates."
+    )
+    response = httpx.post(
+        f"{extraction.base_url.rstrip('/')}/api/chat",
+        json={
+            "model": extraction.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": query},
+            ],
+            "stream": False,
+            "options": {"temperature": extraction.temperature},
+        },
+        timeout=extraction.timeout,
+    )
+    response.raise_for_status()
+    content = response.json()["message"]["content"]
+
+    entities = _parse_string_array(content)
+    LOGGER.info(
+        f"LLM query NER extracted {len(entities)} entities (local/{extraction.model})."
+    )
+    return entities
+
+
+def extract_query_entities_llm(query: str) -> list[str]:
+    """LLM fallback NER for a query: return entity/concept surface strings.
+
+    Tries the remote API first (``NER__*``, default DeepSeek), falling back to
+    the local Ollama model (``EXTRACTION__*``) on failure.
+    """
+    result, _tag = with_fallback(
+        _extract_query_entities_api,
+        _extract_query_entities_ollama,
+        "query_entities",
+        fallback_enabled=ner.fallback_enabled and extraction.fallback_enabled,
+        primary_tag="deepseek",
+        fallback_tag="local",
+        query=query,
+    )
+    return result
 
 
 def extract_query_entities(query: str, *, use_llm_fallback: bool = True) -> list[str]:

@@ -9,3 +9,4 @@ class Chunk(BaseModel):
     source_id: str
     chunk_index: int
     keyword: list[str]
+    doc_id: str | None = None

@@ -1,0 +1,14 @@
+.git
+.gitignore
+.venv
+__pycache__
+*.pyc
+.env
+.env.example
+data/raw
+data/
+src/data/
+logs
+model
+evaluation
+notebooks

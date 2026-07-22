@@ -1,4 +1,4 @@
-"""Adaptive retrieval router — classify query complexity, select strategy."""
+"""Adaptive retrieval router — classify query complexity, route to query interpreter."""
 
 from enum import Enum
 
@@ -19,15 +19,6 @@ _BROAD_WORDS = {"summarize", "overview", "main themes", "explain all"}
 
 
 def _named_entity_count(query: str) -> int:
-    """Approximate how many distinct named entities a query mentions.
-
-    Uses YAKE keyphrases (the same extractor that seeds graph retrieval) instead
-    of the old "every capitalized whitespace token" heuristic, then counts the
-    distinct capitalized tokens inside those phrases — excluding the query's
-    first word so a leading "What"/"Who"/"Compare" is not miscounted as an
-    entity. YAKE-only: this runs on every query, so it must stay cheap and never
-    make a network call (no LLM fallback here).
-    """
     from graph.entity_extraction import extract_keyphrases_yake
 
     parts = query.split()
@@ -44,12 +35,12 @@ def classify_query(query: str) -> QueryComplexity:
     q_lower = query.lower().strip()
     words = q_lower.split()
     word_count = len(words)
-    # Entity richness via YAKE keyphrases (replaces the old capitalized-token
-    # split). Threshold is 2 (not 3) because the count no longer includes the
-    # inflating sentence-initial capitalized word.
     entity_count = _named_entity_count(query)
 
-    if word_count < 8 and any(q_lower.startswith(p) for p in ("what is", "who is", "when did", "where is", "define")):
+    if word_count < 8 and any(
+        q_lower.startswith(p)
+        for p in ("what is", "who is", "when did", "where is", "define")
+    ):
         return QueryComplexity.SIMPLE
 
     if any(phrase in q_lower for phrase in _BROAD_WORDS):
@@ -65,35 +56,20 @@ def classify_query(query: str) -> QueryComplexity:
 
 
 def route_retrieval(query: str) -> dict:
+    """Decouple complexity from hard-coded retrieval strategy.
+
+    Returns the query complexity. Callers should route to query_interpreter
+    for interpretation, then use ``document_routed_search`` with the
+    interpreted filters — the old per-complexity bool flags are removed.
+    """
     complexity = classify_query(query)
-
-    strategies = {
-        QueryComplexity.SIMPLE: {
-            "complexity": "simple",
-            "use_vector": True,
-            "use_bm25": False,
-            "use_graph": False,
-            "use_reranker": False,
-            "top_k": 5,
-        },
-        QueryComplexity.MODERATE: {
-            "complexity": "moderate",
-            "use_vector": True,
-            "use_bm25": True,
-            "use_graph": False,
-            "use_reranker": True,
-            "top_k": 10,
-        },
-        QueryComplexity.COMPLEX: {
-            "complexity": "complex",
-            "use_vector": True,
-            "use_bm25": True,
-            "use_graph": True,
-            "use_reranker": True,
-            "top_k": 20,
-        },
-    }
-
-    strategy = strategies[complexity]
     LOGGER.info(f"Query routed as '{complexity.value}': {query[:60]}...")
-    return strategy
+    return {
+        "complexity": complexity.value,
+        "use_graph": complexity in (QueryComplexity.MODERATE, QueryComplexity.COMPLEX),
+        "top_k": 5
+        if complexity == QueryComplexity.SIMPLE
+        else 10
+        if complexity == QueryComplexity.MODERATE
+        else 20,
+    }

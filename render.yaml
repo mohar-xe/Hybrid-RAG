@@ -1,0 +1,73 @@
+# render.yaml — Render Blueprint (Infrastructure as Code)
+# Deploy: push to GitHub → Render auto-detects this file.
+# See https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: hybrid-rag
+    env: docker
+    dockerfilePath: Dockerfile
+    plan: free
+    region: singapore
+    branch: main
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE__HOST
+        fromService:
+          type: pserv
+          name: hybrid-rag-db
+          property: host
+      - key: DATABASE__PORT
+        value: "5432"
+      - key: DATABASE__DB_NAME
+        fromService:
+          type: pserv
+          name: hybrid-rag-db
+          property: database
+      - key: DATABASE__USER
+        fromService:
+          type: pserv
+          name: hybrid-rag-db
+          property: user
+      - key: DATABASE__PASSWORD
+        fromService:
+          type: pserv
+          name: hybrid-rag-db
+          property: password
+      - key: GENERATOR__BASE_URL
+        sync: false
+      - key: GENERATOR__MODEL
+        sync: false
+      - key: GENERATOR__API_KEY
+        sync: false
+      - key: NER__BASE_URL
+        sync: false
+      - key: NER__MODEL
+        sync: false
+      - key: NER__API_KEY
+        sync: false
+      - key: EMBEDDING__BACKEND
+        value: "api"
+      - key: EMBEDDING__API_BASE_URL
+        sync: false
+      - key: EMBEDDING__API_MODEL
+        value: "mistral-embed"
+      - key: EMBEDDING__API_KEY
+        sync: false
+      - key: RERANKER__BACKEND
+        value: "api"
+      - key: RERANKER__API_BASE_URL
+        sync: false
+      - key: RERANKER__API_MODEL
+        value: "mistral-large-latest"
+      - key: RERANKER__API_KEY
+        sync: false
+      - key: API__API_KEY
+        sync: false
+
+databases:
+  - name: hybrid-rag-db
+    plan: free
+    region: singapore
+    databaseName: hybrid_rag
+    postgresMajorVersion: 16

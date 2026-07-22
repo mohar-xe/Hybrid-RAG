@@ -1,33 +1,28 @@
-"""Embedding generation with a pluggable backend.
+"""Embedding generation with a pluggable backend and API-first fallback.
 
 ``embedder(texts) -> list[vectors]`` is the single public entry point used by
 both ingestion (document vectors) and the query paths (query vectors). The
 backend is chosen by ``EMBEDDING__BACKEND``:
 
-* ``ollama`` (default) — calls a local Ollama server (``nomic-embed-text``).
-  Used for ingestion and local development.
-* ``sentence_transformers`` — runs ``nomic-ai/nomic-embed-text-v1.5`` in-process
-  (CPU), no Ollama required. Intended for the read-only / free deployment.
+* ``api`` (default) — remote OpenAI-compatible API (``/v1/embeddings``).
+* ``ollama`` — local Ollama server (``nomic-embed-text``).
+* ``sentence_transformers`` — runs ``nomic-ai/nomic-embed-text-v1.5`` in-process.
 
-Both paths emit the **same** representation as the frozen corpus: raw text (no
-task prefix, unless ``EMBEDDING__QUERY_PREFIX`` is set), capped to
-``MAX_INPUT_CHARS``, and truncated to the first ``dim`` (256) dimensions
-(Matryoshka). Vectors are returned un-normalized — pgvector cosine (``<=>``) is
-scale-invariant, so query normalization does not affect ranking.
+On failure the configured fallback is tried (default: ollama).
 """
 
+import hashlib
 import numpy as np
 
 from constants.logger import setup_logger
 from constants.exceptions import EmbeddingError
 from config.settings import EmbeddingSettings
+from models.client import ApiClient, OllamaClient
+from models.fallback import with_fallback
+from cache import embedding_cache
 
 LOGGER = setup_logger(__name__)
 EMBEDDING_DIM = 256
-# Ollama CPU embedding shows no batch speedup (per-input cost is fixed) and a
-# very large batch becomes a single long-running request that monopolizes the
-# runner. A modest batch keeps requests short and progress incremental.
-BATCH_SIZE = 16
 # nomic-embed-text has a 2048-token context. ~4 chars/token, so ~8000 chars is
 # a safe per-input budget. We cap client-side (deterministic, fast, and avoids
 # huge request payloads) rather than relying solely on server-side truncation.
@@ -57,11 +52,7 @@ def _cap(texts: list[str], prefix: str) -> list[str]:
     return [t[:MAX_INPUT_CHARS] for t in texts]
 
 
-def _embed_ollama(chunks: list[str], model: str, dim: int, batch_size: int) -> np.ndarray:
-    import ollama
-
-    ensure_model(model)
-
+def _log_truncated(chunks: list[str]) -> None:
     truncated = sum(1 for c in chunks if len(c) > MAX_INPUT_CHARS)
     if truncated:
         LOGGER.warning(
@@ -69,12 +60,38 @@ def _embed_ollama(chunks: list[str], model: str, dim: int, batch_size: int) -> n
             f"and were truncated before embedding."
         )
 
+
+def _embed_api(chunks: list[str], model: str, dim: int, batch_size: int) -> np.ndarray:
+    api_key = _settings.api_key.get_secret_value()
+    api_model = _settings.api_model or model
+    if not api_key or not _settings.api_base_url:
+        raise EmbeddingError(
+            "API embedding backend requires EMBEDDING__API_BASE_URL and EMBEDDING__API_KEY."
+        )
+    client = ApiClient(base_url=_settings.api_base_url, api_key=api_key)
+    _log_truncated(chunks)
+    inputs = _cap(chunks, _settings.query_prefix)
+    all_embeddings: list[list[float]] = []
+    for i in range(0, len(inputs), batch_size):
+        batch = inputs[i : i + batch_size]
+        emb = client.embed(batch, model=api_model)
+        all_embeddings.extend(emb)
+    return np.array(all_embeddings)[:, :dim]
+
+
+def _embed_ollama(
+    chunks: list[str], model: str, dim: int, batch_size: int
+) -> np.ndarray:
+    import ollama as _ollama
+
+    ensure_model(model)
+    _log_truncated(chunks)
+
     all_embeddings: list[list[float]] = []
     inputs = _cap(chunks, _settings.query_prefix)
     for i in range(0, len(inputs), batch_size):
-        # `truncate=True` is a server-side safety net for token-vs-char slack.
         batch = inputs[i : i + batch_size]
-        response = ollama.embed(model, input=batch, truncate=True)
+        response = _ollama.embed(model, input=batch, truncate=True)
         all_embeddings.extend(response["embeddings"])
 
     return np.array(all_embeddings)[:, :dim]
@@ -86,21 +103,20 @@ def _get_st_model():
     if _ST_MODEL is None:
         from sentence_transformers import SentenceTransformer
 
-        LOGGER.info(f"Loading sentence-transformers embedder '{_settings.st_model}' (CPU)...")
-        # nomic-embed-text-v1.5 ships custom modeling code -> trust_remote_code.
-        _ST_MODEL = SentenceTransformer(_settings.st_model, trust_remote_code=True, device="cpu")
+        LOGGER.info(
+            f"Loading sentence-transformers embedder '{_settings.st_model}' (CPU)..."
+        )
+        _ST_MODEL = SentenceTransformer(
+            _settings.st_model, trust_remote_code=True, device="cpu"
+        )
     return _ST_MODEL
 
 
-def _embed_sentence_transformers(chunks: list[str], dim: int, batch_size: int) -> np.ndarray:
+def _embed_sentence_transformers(
+    chunks: list[str], dim: int, batch_size: int
+) -> np.ndarray:
     model = _get_st_model()
-
-    truncated = sum(1 for c in chunks if len(c) > MAX_INPUT_CHARS)
-    if truncated:
-        LOGGER.warning(
-            f"{truncated}/{len(chunks)} input(s) exceeded {MAX_INPUT_CHARS} chars "
-            f"and were truncated before embedding."
-        )
+    _log_truncated(chunks)
 
     inputs = _cap(chunks, _settings.query_prefix)
     vecs = model.encode(
@@ -110,29 +126,76 @@ def _embed_sentence_transformers(chunks: list[str], dim: int, batch_size: int) -
         normalize_embeddings=False,
         show_progress_bar=False,
     )
-    # Matryoshka truncation to match the stored 256-d vectors.
     return np.asarray(vecs)[:, :dim]
+
+
+_BACKENDS = {
+    "api": _embed_api,
+    "ollama": _embed_ollama,
+    "sentence_transformers": _embed_sentence_transformers,
+}
+
+
+def _run_backend(name: str, chunks: list[str], dim: int, batch_size: int) -> np.ndarray:
+    fn = _BACKENDS.get(name)
+    if fn is None:
+        raise EmbeddingError(f"Unknown embedding backend: {name!r}")
+    return fn(chunks, model=_settings.model, dim=dim, batch_size=batch_size)
 
 
 def embedder(
     chunks: list[str],
     model: str | None = None,
     dim: int = EMBEDDING_DIM,
-    batch_size: int = BATCH_SIZE,
+    batch_size: int | None = None,
 ) -> list[list[float]]:
-    """Embed ``chunks`` into ``dim``-d vectors using the configured backend."""
+    """Embed ``chunks`` into ``dim``-d vectors using the configured backend.
+
+    Tries the primary backend first; on failure falls back to the configured
+    fallback (if enabled). Returns the vector list only (backend tag is logged).
+    """
     if not chunks:
         return []
 
-    try:
-        if _settings.backend == "sentence_transformers":
-            embeddings = _embed_sentence_transformers(chunks, dim, batch_size)
-        else:
-            embeddings = _embed_ollama(chunks, model or _settings.model, dim, batch_size)
-    except EmbeddingError:
-        raise
-    except Exception as e:
-        raise EmbeddingError(f"Embedding failed (backend={_settings.backend}): {e}")
+    _cache_key: str | None = None
+    if len(chunks) == 1:
+        _cache_key = hashlib.md5(chunks[0].encode("utf-8")).hexdigest()
+        cached = embedding_cache.get(_cache_key)
+        if cached is not None:
+            LOGGER.debug("Embedding cache hit for %s...", chunks[0][:40])
+            return cached
 
-    LOGGER.info(f"Embedded {len(chunks)} chunks (dim={dim}, backend={_settings.backend}).")
-    return embeddings.tolist()
+    batch_size = batch_size or _settings.batch_size
+
+    primary = _settings.backend
+
+    if _settings.fallback_enabled and primary != _settings.fallback_backend:
+
+        def primary_fn(texts=chunks):
+            return _run_backend(primary, texts, dim, batch_size)
+
+        def fallback_fn(texts=chunks):
+            return _run_backend(_settings.fallback_backend, texts, dim, batch_size)
+
+        try:
+            embeddings, backend = with_fallback(
+                primary_fn,
+                fallback_fn,
+                "embedder",
+                primary_tag=primary,
+                fallback_tag=_settings.fallback_backend,
+            )
+        except Exception as e:
+            raise EmbeddingError(f"Embedding failed (all backends): {e}")
+    else:
+        try:
+            embeddings = _run_backend(primary, chunks, dim, batch_size)
+            backend = primary
+        except Exception as e:
+            raise EmbeddingError(f"Embedding failed (backend={primary}): {e}")
+
+    result = embeddings.tolist()
+    if _cache_key is not None:
+        embedding_cache.set(_cache_key, result)
+    LOGGER.info(f"Embedded {len(chunks)} chunks (dim={dim}, backend={backend}).")
+    return result

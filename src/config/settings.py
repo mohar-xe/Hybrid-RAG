@@ -49,6 +49,7 @@ class DatabaseSettings(BaseSettings):
             parts.append(f"password={secret}")
         return " ".join(parts)
 
+
 class GraphSettings(BaseSettings):
     # Absolute, CWD-independent path to the embedded Kùzu graph DB. Anchored to
     # the package root rather than left relative: a relative "data/kuzu_db"
@@ -84,27 +85,38 @@ class GraphSettings(BaseSettings):
         working directory. Absolute paths are left untouched."""
         return v if v.is_absolute() else (_SRC / v).resolve()
 
+
 class EmbeddingSettings(BaseSettings):
     """Query/document embedding configuration (``EMBEDDING__*``).
 
     Self-contained (own ``env_prefix``) so it can be read without building the
     full ``Settings`` — mirroring ``ExtractionSettings`` / ``NERSettings``.
 
-    Two backends produce the same 256-d (Matryoshka-truncated) vectors:
-      * ``ollama``                — local Ollama server (default). Used for
-        ingestion and local dev; requires Ollama running.
-      * ``sentence_transformers`` — in-process HF model, no Ollama. Used for the
-        read-only / free deployment (e.g. HF Spaces) where running Ollama isn't
-        practical. Loads ``st_model`` lazily on first use.
+    Three backends produce the same 256-d (Matryoshka-truncated) vectors:
+      * ``api``                 — remote OpenAI-compatible API (default).
+      * ``ollama``              — local Ollama server.
+      * ``sentence_transformers`` — in-process HF model (air-gapped deploys).
     """
+
     model_config = SettingsConfigDict(
         env_prefix="embedding__", env_file=_ENV_FILE, extra="ignore"
     )
-    backend: Literal["ollama", "sentence_transformers"] = "ollama"
-    model: str = "nomic-embed-text"                     # Ollama model name
-    st_model: str = "nomic-ai/nomic-embed-text-v1.5"    # sentence-transformers model id
+    backend: Literal["api", "ollama", "sentence_transformers"] = "api"
+    # Backend-specific model config
+    api_base_url: str = ""
+    api_model: str = ""
+    api_key: SecretStr = SecretStr("")
+    model: str = "nomic-embed-text"  # Ollama model name
+    st_model: str = "nomic-ai/nomic-embed-text-v1.5"  # sentence-transformers model id
+    # Fallback
+    fallback_backend: Literal["api", "ollama", "sentence_transformers", "none"] = (
+        "ollama"
+    )
+    fallback_enabled: bool = True
+    ollama_base_url: str = "http://localhost:11434"
     embed_dim: int = 256
     batch_size: int = 128
+    api_rate_limit: float = 1  # API calls per minute (Mistral: 1 RPM)
     # Task prefix prepended to every input before embedding. Empty by default to
     # match the FROZEN corpus: Ollama's nomic-embed-text template is
     # `{{ .Prompt }}` (no prefix), so the stored vectors are prefix-free. Only
@@ -112,10 +124,23 @@ class EmbeddingSettings(BaseSettings):
     # prefix that the documents didn't use puts queries in a different subspace.
     query_prefix: str = ""
 
+
 class GeneratorSettings(BaseSettings):
+    """LLM generation configuration with API-first + Ollama fallback."""
+
+    # Primary API backend
     base_url: str
     model: str
     api_key: SecretStr
+    # Backend selection
+    backend: Literal["api", "ollama"] = "api"
+    # Fallback
+    fallback_backend: Literal["api", "ollama", "none"] = "ollama"
+    fallback_enabled: bool = True
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_model: str = "qwen2.5:7b"
+    api_rate_limit: float = 60  # OpenRouter: generous default
+
 
 class ExtractionSettings(BaseSettings):
     """Local finetuned model used for KG entity/triplet extraction (Ollama-native API).
@@ -124,6 +149,7 @@ class ExtractionSettings(BaseSettings):
     without constructing the full application Settings (database, generator, ...).
     Reads EXTRACTION__* env vars, identical to its nested form under Settings.
     """
+
     # The shared project .env also holds keys for other settings groups
     # (DATABASE__*, GENERATOR__*, ...). As a prefixed, self-contained model we
     # only own EXTRACTION__* keys, so ignore everything else instead of
@@ -146,6 +172,8 @@ class ExtractionSettings(BaseSettings):
     concurrency: Annotated[int, Field(ge=1, le=64)] = 10
     min_triplets: Annotated[int, Field(ge=1)] = 1
     max_triplets: Annotated[int, Field(ge=1)] = 8
+    # Fallback
+    fallback_enabled: bool = True
 
 
 class NERSettings(BaseSettings):
@@ -157,6 +185,7 @@ class NERSettings(BaseSettings):
     keeps working without it; it is validated at call time only when the
     ``deepseek`` backend is actually used.
     """
+
     model_config = SettingsConfigDict(
         env_prefix="ner__", env_file=_ENV_FILE, extra="ignore"
     )
@@ -175,11 +204,30 @@ class NERSettings(BaseSettings):
     disable_thinking: bool = True
     min_triplets: Annotated[int, Field(ge=1)] = 1
     max_triplets: Annotated[int, Field(ge=1)] = 8
+    # Fallback
+    fallback_enabled: bool = True
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_model: str = "hgr-triplet:q4"
+    # Gemini: bundle N chunks per API call, rate-limit to N RPM
+    batch_size: int = 30
+    api_rate_limit: float = 5
 
 
 class RerankerSettings(BaseSettings):
+    """Cross-encoder reranking configuration with API-first + fallback."""
+
     model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     top_k: int = 5
+    # Backend selection
+    backend: Literal["api", "ollama", "hf"] = "api"
+    fallback_backend: Literal["api", "ollama", "hf", "none"] = "ollama"
+    fallback_enabled: bool = True
+    api_base_url: str = ""
+    api_model: str = ""
+    api_key: SecretStr = SecretStr("")
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_model: str = "qwen2.5:7b"
+    api_rate_limit: float = 1  # Mistral: 1 RPM
 
 
 class ContextSettings(BaseSettings):
@@ -190,6 +238,7 @@ class ContextSettings(BaseSettings):
     real tokenizer lives server-side). Keep headroom below the generator's
     context length for the system prompt, the question, and the answer.
     """
+
     max_tokens: Annotated[int, Field(ge=256)] = 3000
     # Words -> approx tokens multiplier used to estimate chunk size without a
     # tokenizer dependency. ~1.3 is a reasonable English heuristic.
@@ -197,12 +246,63 @@ class ContextSettings(BaseSettings):
 
 
 class VerifierSettings(BaseSettings):
+    """Faithfulness verifier configuration with API-first + fallback."""
+
     # Off by default: the NLI cross-encoder is heavy and adds latency to every
     # /query. Enable explicitly (VERIFIER__ENABLED=true) to populate the
     # `faithfulness` score on responses.
     enabled: bool = False
     model: str = "cross-encoder/nli-deberta-v3-base"
     threshold: float = 0.6
+    # Backend selection
+    backend: Literal["api", "ollama", "hf"] = "api"
+    fallback_backend: Literal["api", "ollama", "hf", "none"] = "ollama"
+    fallback_enabled: bool = True
+    api_base_url: str = ""
+    api_model: str = ""
+    api_key: SecretStr = SecretStr("")
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_model: str = "qwen2.5:7b"
+    api_rate_limit: float = 60  # OpenRouter
+
+
+class MetadataSettings(BaseSettings):
+    """Document metadata extraction configuration (``METADATA__*``).
+
+    Primary backend: Gemini 3.6 Flash via OpenAI-compatible endpoint.
+    Falls back to spaCy local extraction when the API is unavailable or the
+    document exceeds ``max_doc_chars``.
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="metadata__", env_file=_ENV_FILE, extra="ignore"
+    )
+    base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai"
+    model: str = "gemini-3.6-flash"
+    api_key: SecretStr = SecretStr("")
+    max_doc_chars: int = 1_000_000
+    num_questions: int = 8
+    timeout: float = 120.0
+    backend: Literal["api", "local"] = "api"
+    fallback_backend: Literal["api", "local", "none"] = "local"
+    fallback_enabled: bool = True
+
+
+class QuerySettings(BaseSettings):
+    """Query understanding configuration (``QUERY__*``).
+
+    Cheap/fast Flash-Lite call at query time — translates natural language into
+    ``semantic_query`` + structured filters.
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="query__", env_file=_ENV_FILE, extra="ignore"
+    )
+    base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai"
+    model: str = "gemini-2.0-flash-lite"
+    api_key: SecretStr = SecretStr("")
+    timeout: float = 10.0
+    temperature: float = 0.0
 
 
 class APISettings(BaseSettings):
@@ -214,6 +314,7 @@ class APISettings(BaseSettings):
     referencing files resolving outside it are rejected, preventing the endpoint
     from reading arbitrary server files.
     """
+
     api_key: SecretStr = SecretStr("")
     ingest_dir: Path = _ROOT / "data"
 
@@ -231,10 +332,13 @@ class Settings(BaseSettings):
     generator: GeneratorSettings
     extraction: ExtractionSettings = ExtractionSettings()
     ner: NERSettings = NERSettings()
+    metadata: MetadataSettings = MetadataSettings()
+    query: QuerySettings = QuerySettings()
     reranker: RerankerSettings = RerankerSettings()
     context: ContextSettings = ContextSettings()
     verifier: VerifierSettings = VerifierSettings()
     api: APISettings = APISettings()
+
 
 def get_settings() -> Settings:
     return Settings()
