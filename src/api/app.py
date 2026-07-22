@@ -10,8 +10,10 @@ a deployment to an untrusted network.
 
 import secrets
 import threading
+import time
 import uuid
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
@@ -139,6 +141,26 @@ def _validate_ingest_path(file_path: str) -> str:
     return str(resolved)
 
 
+@dataclass
+class _Timer:
+    stages: list[dict] = field(default_factory=list)
+    _start: float = 0.0
+    _current: str | None = None
+
+    def start(self, name: str):
+        if self._current is not None:
+            self.end()
+        self._current = name
+        self._start = time.monotonic()
+
+    def end(self, items: int = 0):
+        if self._current is None:
+            return
+        elapsed = round((time.monotonic() - self._start) * 1000)
+        self.stages.append({"name": self._current, "ms": elapsed, "items": items})
+        self._current = None
+
+
 class QueryRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
     top_k: int = Field(default=5, ge=1, le=20)
@@ -149,6 +171,7 @@ class QueryResponse(BaseModel):
     answer: str
     citations: list[dict]
     faithfulness: float | None = None
+    metrics: dict | None = None
 
 
 def _run_ingestion(
@@ -315,6 +338,9 @@ async def ingest_status(task_id: str):
     dependencies=[Depends(require_api_key), _rate_limit("query")],
 )
 async def query(req: QueryRequest):
+    _t_start = time.monotonic()
+    t = _Timer()
+
     from reasoning.router import route_retrieval
     from reasoning.query_interpreter import interpret_query
     from retrieval.pgvector import (
@@ -329,40 +355,54 @@ async def query(req: QueryRequest):
     from embeddings.embedder import embedder
 
     # 0: route & interpret
+    t.start("query_understanding")
     strategy = route_retrieval(req.question)
     interpreted = interpret_query(req.question)
     semantic_query = interpreted.get("semantic_query", req.question)
     filters = interpreted.get("filters", {})
+    t.end()
 
+    # embed
+    t.start("embedding")
     query_emb = embedder([semantic_query])[0]
+    t.end()
 
     # 1: hard filter
+    t.start("hard_filter")
     doc_ids = hard_filter_docs(
         doc_type=filters.get("doc_type"),
         is_latest=filters.get("is_latest"),
         date_after=filters.get("date_after"),
     )
+    t.end(items=len(doc_ids))
 
     # 2: doc-level soft ranking
+    t.start("doc_soft_rank")
     ranked_docs = doc_level_soft_rank(query_emb, semantic_query, doc_ids)
     if ranked_docs:
         doc_ids = [d[0] for d in ranked_docs]
         doc_rank_map = {d[0]: i + 1 for i, d in enumerate(ranked_docs)}
     else:
         doc_rank_map = None
+    t.end(items=len(ranked_docs) if ranked_docs else 0)
 
     # 3-4: chunk-level hybrid search + cross-list RRF fusion
+    t.start("chunk_hybrid_search")
     chunks = document_routed_search(
         query_emb, semantic_query, doc_ids, doc_rank_map=doc_rank_map
     )
+    t.end(items=len(chunks))
 
     if not chunks:
         raise HTTPException(404, "No relevant context found")
 
     # 5: rerank
+    t.start("rerank")
     chunks = rerank(semantic_query, chunks, top_k=req.top_k)
+    t.end(items=len(chunks))
 
     # 6-7: graph
+    t.start("graph_expansion")
     graph_facts = ""
     if strategy.get("use_graph", False):
         from graph.entity_extraction import extract_query_entities
@@ -370,15 +410,21 @@ async def query(req: QueryRequest):
         entities = extract_query_entities(req.question)
         if entities:
             graph_facts = get_entity_context(entities)
+    t.end(items=len(graph_facts))
 
+    # 8: assemble context
+    t.start("context_build")
     context, citations = build_context(chunks, graph_facts)
+    t.end(items=len(citations))
 
     if req.stream:
         return StreamingResponse(
             generate(req.question, context, stream=True), media_type="text/plain"
         )
 
+    t.start("generate")
     answer = generate(req.question, context)
+    t.end()
 
     faithfulness = None
     if settings.verifier.enabled and context:
@@ -396,6 +442,15 @@ async def query(req: QueryRequest):
             for c in citations
         ],
         faithfulness=faithfulness,
+        metrics={
+            "total_ms": round((time.monotonic() - _t_start) * 1000),
+            "stages": t.stages,
+            "models": {
+                "embedder": settings.embedding.backend,
+                "reranker": settings.reranker.backend,
+                "generator": settings.generator.backend,
+            },
+        },
     )
 
 

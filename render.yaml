@@ -46,9 +46,6 @@ services:
         value: "mistral-large-latest"
       - key: RERANKER__API_KEY
         sync: false
-      - key: API__API_KEY
-        sync: false
-
       # ------------------------------------------------------------------
       # Disable all local-model fallbacks — Docker has no Ollama or spaCy.
       # The primary API is the only path; a failure -> a clean error, not a

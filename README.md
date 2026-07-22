@@ -309,7 +309,6 @@ The included [`render.yaml`](render.yaml) declares both the web service and a fr
 | `EMBEDDING__API_KEY` | [Get from Mistral](https://console.mistral.ai/api-keys/) |
 | `RERANKER__API_BASE_URL` | `https://api.mistral.ai/v1` |
 | `RERANKER__API_KEY` | Same Mistral key |
-| `API__API_KEY` | Pick any secret string (e.g. `my-secret-key-123`) |
 
    All local-model fallbacks are **disabled in the blueprint** (`*__FALLBACK_ENABLED=false`) — the deployment is API-only. If a primary API fails, you get a clean error rather than a connection-refused to a non-existent Ollama or missing spaCy.
 

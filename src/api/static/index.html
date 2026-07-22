@@ -193,6 +193,36 @@ header h1 span { color: var(--fg1); font-weight: 400; }
 .query-row input:focus { border-color: var(--blue); }
 .query-row input::placeholder { color: var(--fg1); }
 
+.metrics { margin-top: 12px; border-top: 1px solid var(--bg2); padding-top: 8px; }
+.metrics-toggle {
+  font-size: 12px; color: var(--fg1); cursor: pointer; user-select: none;
+  padding: 4px 0; display: inline-block;
+}
+.metrics-toggle:hover { color: var(--blue); }
+.metrics-body { display: none; margin-top: 8px; }
+.metrics-body.open { display: block; }
+.metrics-bar {
+  display: flex; height: 8px; border-radius: 4px; overflow: hidden; margin-bottom: 10px;
+}
+.metrics-bar .seg {
+  height: 100%; transition: width .3s; position: relative; min-width: 2px;
+}
+.metrics-bar .seg:hover { opacity: .8; }
+.metrics-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.metrics-table th {
+  text-align: left; padding: 4px 8px; color: var(--fg1);
+  border-bottom: 1px solid var(--bg2); font-weight: 500;
+}
+.metrics-table td { padding: 4px 8px; border-bottom: 1px solid var(--bg0); }
+.metrics-table tr:last-child td { border-bottom: none; }
+.metrics-table .bar-cell { display: flex; align-items: center; gap: 6px; }
+.metrics-table .swatch {
+  width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0;
+}
+.metrics-table .num { text-align: right; font-variant-numeric: tabular-nums; color: var(--fg0); }
+.metrics-table .num-dim { text-align: right; font-variant-numeric: tabular-nums; color: var(--fg1); }
+.metrics-footer { font-size: 11px; color: var(--fg1); margin-top: 8px; }
+
 .toast {
   position: fixed;
   bottom: 100px;
@@ -429,12 +459,47 @@ askBtn.addEventListener('click', async () => {
     if (d.faithfulness != null) {
       html += `<div class="ref">Faithfulness: ${(d.faithfulness * 100).toFixed(0)}%</div>`;
     }
+    if (d.metrics) {
+      html += metricsToHTML(d.metrics);
+    }
     addMsg('assistant', html);
   } catch (e) {
     removeThinking();
     addMsg('system', 'Request failed: ' + e.message);
   }
 });
+
+const _STAGE_COLORS = {
+  query_understanding: '#458588', embedding: '#98971a', hard_filter: '#d79921',
+  doc_soft_rank: '#d65d0e', chunk_hybrid_search: '#cc241d', rerank: '#b16286',
+  graph_expansion: '#689d6a', context_build: '#928374', generate: '#fbf1c7',
+};
+
+function metricsToHTML(m) {
+  const stages = m.stages || [];
+  const total = m.total_ms || 1;
+  const bar = stages.map(s =>
+    `<div class="seg" style="width:${(s.ms/total*100).toFixed(1)}%;background:${_STAGE_COLORS[s.name]||'var(--bg2)'}" title="${s.name}: ${s.ms}ms"></div>`
+  ).join('');
+  const rows = stages.map(s =>
+    `<tr><td><div class="bar-cell"><span class="swatch" style="background:${_STAGE_COLORS[s.name]||'var(--bg2)'}"></span>${s.name}</div></td><td class="num">${s.ms}</td><td class="num-dim">${s.items}</td></tr>`
+  ).join('');
+  const models = m.models || {};
+  const footer = Object.entries(models).filter(([,v]) => v).map(([k,v]) => `${k}: ${v}`).join(' · ');
+  const id = 'm' + Math.random().toString(36).slice(2, 8);
+
+  return `<div class="metrics">
+    <span class="metrics-toggle" onclick="(function(el){var b=document.getElementById('${id}');b.classList.toggle('open');el.textContent=b.classList.contains('open')?'Pipeline Metrics \u25B2':'Pipeline Metrics \u25BC'})(this)">Pipeline Metrics \u25BC</span>
+    <div class="metrics-body" id="${id}">
+      <div class="metrics-bar">${bar}</div>
+      <table class="metrics-table">
+        <thead><tr><th>Stage</th><th class="num">ms</th><th class="num-dim">items</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <div class="metrics-footer">${total}ms total${footer ? ' · ' + footer : ''}</div>
+    </div>
+  </div>`;
+}
 
 async function init() {
   sessionStorage.removeItem('api_key');
