@@ -60,11 +60,6 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         LOGGER.warning(f"Database init failed (continuing): {e}")
 
-    if not settings.api.api_key.get_secret_value():
-        LOGGER.warning(
-            "API__KEY is not set — the API is running UNAUTHENTICATED. Set "
-            "API__KEY in .env before exposing this service."
-        )
     yield
     LOGGER.info("Shutting down.")
 
@@ -271,7 +266,7 @@ class IngestRequest(BaseModel):
     supersedes: str | None = None
 
 
-@app.post("/ingest", dependencies=[Depends(require_api_key), _rate_limit("ingest")])
+@app.post("/ingest")
 async def ingest(
     req: IngestRequest,
     background_tasks: BackgroundTasks = None,
@@ -298,9 +293,7 @@ async def ingest(
     return {"task_id": task_id, "status": "accepted"}
 
 
-@app.post(
-    "/ingest/upload", dependencies=[Depends(require_api_key), _rate_limit("ingest")]
-)
+@app.post("/ingest/upload")
 async def ingest_upload(
     file: UploadFile = File(...),
     background_tasks: BackgroundTasks = None,
@@ -332,18 +325,14 @@ async def ingest_upload(
     return {"task_id": task_id, "status": "accepted", "filename": file.filename}
 
 
-@app.get("/ingest/{task_id}", dependencies=[Depends(require_api_key)])
+@app.get("/ingest/{task_id}")
 async def ingest_status(task_id: str):
     if task_id not in _tasks:
         raise HTTPException(404, "Task not found")
     return _tasks[task_id]
 
 
-@app.post(
-    "/query",
-    response_model=None,
-    dependencies=[Depends(require_api_key), _rate_limit("query")],
-)
+@app.post("/query", response_model=None)
 async def query(req: QueryRequest):
     _t_start = time.monotonic()
     t = _Timer()
