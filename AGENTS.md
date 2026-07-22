@@ -8,11 +8,8 @@ A hybrid retrieval-augmented generation system that combines **document-level cl
 with **knowledge-graph traversal (KùzuDB)** for question answering. Python 3.12+, managed
 with `uv`.
 
-The README separates **"What Exists"** from **"What Will Be Implemented"**, but it has drifted
-out of date — it still lists retrieval, the graph store, entity extraction, the CLI, and the
-FastAPI app as "planned" even though they are implemented. **Treat `src/` as the source of
-truth for what exists**, not the README. Do not assume a planned feature exists — verify in
-`src/` first.
+The README is the source of truth for the project overview. For implementation details
+and per-file conventions, consult this file and the source code in `src/`.
 
 **Document-level clustering (8-stage retrieval funnel) has replaced the old K-Means/medoid
 path.** The old `cluster_routed_search`, `vector_search`, `bm25_search`, `hybrid_search`
@@ -123,7 +120,7 @@ retrieval/   pgvector.py (8-stage funnel: hard_filter_docs, doc_level_soft_rank,
 reasoning/   router.py (complexity), query_interpreter.py (semantic_query + filters)
 context/     builder.py — context assembly + citations
 llm/         generator.py — OpenAI-compatible generation
-verification/ verifier.py — NLI faithfulness scoring [planned — settings exist]
+verification/ verifier.py — NLI faithfulness scoring
 api/         app.py — FastAPI surface (/ingest, /query, /health)
 demo/        app.py — Gradio UI for interactive demos with retrieval internals
 pipeline.py  Typer CLI (ingest, ask, merge-graph) — real entry point
@@ -210,7 +207,7 @@ Concurrency: `extract_entities_batch` runs I/O-bound calls via `ThreadPoolExecut
 (order-preserved), default concurrency 10. The ingest graph phase writes results to Kùzu
 serially (Kùzu connection is not thread-safe; the API uses `_GRAPH_WRITE_LOCK`).
 
-`NER__DISABLE_THINKING` (default `true`) disables DeepSeek's reasoning — critical for
+`NER__DISABLE_THINKING` (default `true`) disables the provider's reasoning/thinking mode — critical for
 structured extraction. Leave this on unless a backend rejects the field.
 
 ## Document-level clustering (metadata extraction)
@@ -288,13 +285,19 @@ Ollama at `http://localhost:11434` or import an uninstalled spaCy. Settings.py d
 
 ## Verification
 
-There is **no test suite or linter configured** yet. After changes:
+Tests live under `evaluation/tests/` (pytest). Run them with:
+
+```bash
+uv run --extra dev pytest evaluation/tests/
+```
+
+After changes:
 - Confirm the module imports cleanly from `src/` (e.g. `cd src && uv run python -c "import pipeline"`).
   Several modules call `get_settings()` at **import time**, so importing requires a populated
   `.env` (at minimum the `DATABASE__*` and `GENERATOR__*` required fields).
 - For ingestion/retrieval changes, a manual `ingest` then `ask` against a sample file in
   `data/` is the realistic smoke test (requires Postgres + Ollama running).
-- If you add tests, place them under a top-level `tests/` and prefer `pytest`.
+- If you add new tests, place them under `evaluation/tests/` and prefer `pytest`.
 
 ## Related projects (same workspace)
 

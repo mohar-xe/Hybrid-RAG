@@ -44,11 +44,12 @@ Most "RAG" projects stop at *embed → cosine search → stuff into a prompt*. T
 - **8-stage retrieval funnel.** Query understanding → hard SQL filters → doc-level soft ranking (summary + question ANN + entity boost) → chunk-level hybrid search (dense + lexical) → cross-list RRF fusion → cross-encoder rerank → structural graph expansion (small-to-big) → KG facts. Every stage is independently measurable.
 - **Document-level clustering, not K-Means medoids.** Each document gets rich metadata at ingest time (Gemini-extracted title, summary, synthetic questions, topic tags, entities, version info). Synthetic questions are indexed individually — a query phrased as a question matches those vectors far better than a pooled centroid.
 - **A knowledge graph that maintains itself.** LLM triplet extraction (two interchangeable backends), schema-validated relations, and **ANN-based near-duplicate node merging** (`hnswlib` candidate search + a lexical-overlap gate + chaining-safe "absorb-only" merges) to keep the graph clean as it grows.
-- **Bring-your-own extraction model.** The default backend is a remote OpenAI-compatible API (DeepSeek); the `local` backend serves a **fine-tuned Qwen3-0.6B** (`hgr-triplet:q4`) through Ollama for fully offline triplet extraction.
+- **Bring-your-own extraction model.** Two interchangeable backends: `deepseek` (default) routes through whatever `NER__*` endpoint is configured (Gemini 3.6 Flash by default); `local` serves a **fine-tuned Qwen3-0.6B** (`hgr-triplet:q4`) through Ollama for fully offline triplet extraction.
 - **Document versioning.** Track revisions with `--version-label` / `--supersedes` flags; the query interpreter infers `is_latest` semantics and applies `NOT EXISTS` hard filters over the version chain.
 - **Faithfulness verification.** An opt-in NLI cross-encoder (DeBERTa) scores how well each answer sentence is entailed by the retrieved context.
 - **Evidence, not vibes.** A reproducible HotpotQA harness runs a 7-configuration ablation (direct / semantic / +BM25 / +graph × rerank on/off) and reports F1, EM, recall, retrieval hit@k, answer-in-context, and latency percentiles.
-- **Two entry points over one core.** A Typer CLI (`ingest`, `ask`, `merge-graph`) and a FastAPI service (`/ingest`, `/query`, `/health`) with API-key auth, file-upload ingestion, async processing, and token streaming.
+- **Two entry points over one core.** A Typer CLI (`ingest`, `ask`, `merge-graph`) and a FastAPI service (`/ingest`, `/query`, `/health`) with optional API-key auth, file-upload ingestion, async processing, and token streaming.
+- **Transparent query metrics.** Every `/query` response includes a per-stage latency breakdown (query understanding → embedding → hard filter → doc soft rank → chunk hybrid search → rerank → graph expansion → context build → generate) displayed as an interactive collapsible panel in the frontend — purpose-built for technical interviews and portfolio reviews.
 
 ---
 
@@ -196,7 +197,7 @@ curl -X POST localhost:8000/query \
   -d '{"question": "What is this document about?", "top_k": 5}'
 ```
 
-> **Security:** if `API__API_KEY` is empty the service runs **unauthenticated** and warns at startup. Set it (and keep `/ingest` inside `API__INGEST_DIR`) before exposing the API to any untrusted network.
+> **Security:** `API__API_KEY` is optional. When unset the service runs **unauthenticated** and logs a warning at startup. Set a key (and keep `/ingest` inside `API__INGEST_DIR`) before exposing the API to an untrusted network.
 
 ## Gradio Demo UI
 
@@ -268,7 +269,7 @@ Required to run: `GENERATOR__*` (generation endpoint), `DATABASE__*` (Postgres),
 
 ## Roadmap
 
-Implemented features are listed above and verifiable in `src/`. Planned (config may be scaffolded, logic not yet wired):
+Implemented features are listed above and verifiable in `src/`. Planned:
 
 - **HyDE** — embed a hypothetical answer to improve recall on sparse queries
 - **RAPTOR-style hierarchical summaries** — cluster → summarize → re-cluster for broad/thematic questions
@@ -345,7 +346,6 @@ RERANKER__BACKEND=api
 RERANKER__API_BASE_URL=https://api.mistral.ai/v1
 RERANKER__API_MODEL=mistral-large-latest
 RERANKER__API_KEY=<your-key>
-API__API_KEY=<your-key>
 ```
 
    Also add these to **disable local fallbacks** (no Ollama or spaCy in the container):
