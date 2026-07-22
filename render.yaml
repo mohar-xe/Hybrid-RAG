@@ -12,12 +12,10 @@ services:
     branch: main
     healthCheckPath: /health
     envVars:
-      # Auto-wired from the Postgres database below. Render only exposes
-      # connectionString, host, hostport, port — so we use connectionString
-      # and our settings parse it via DATABASE__CONNECTION_STRING.
+      # Auto-wired from the Postgres database below. Our settings parse
+      # this via DATABASE__CONNECTION_STRING (see config/settings.py).
       - key: DATABASE__CONNECTION_STRING
-        fromService:
-          type: pserv
+        fromDatabase:
           name: hybrid-rag-db
           property: connectionString
       - key: GENERATOR__BASE_URL
