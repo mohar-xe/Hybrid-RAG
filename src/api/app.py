@@ -24,6 +24,7 @@ from fastapi import (
     Form,
     Header,
     HTTPException,
+    Request,
     UploadFile,
 )
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -32,6 +33,7 @@ from pydantic import BaseModel, Field
 
 from config.settings import get_settings
 from constants.logger import setup_logger
+from api.rate_limit import check_limit, LIMITS
 
 LOGGER = setup_logger(__name__)
 settings = get_settings()
@@ -65,6 +67,32 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan, title="Hybrid-RAG", version="0.1.0")
+
+
+# ── Rate limit dependency ────────────────────────────────────────────────
+
+
+def _rate_limit(action: str):
+    def _check(
+        request: Request,
+        x_api_key: str | None = Header(default=None),
+        x_forwarded_for: str | None = Header(default=None),
+    ):
+        allowed, used = check_limit(
+            action,
+            x_api_key=x_api_key,
+            x_forwarded_for=x_forwarded_for,
+            remote=request.client.host if request.client else "",
+        )
+        if not allowed:
+            max_ = LIMITS.get(action, 0)
+            raise HTTPException(
+                429,
+                detail=f"Daily {action} limit reached ({used}/{max_}). Resets at midnight UTC.",
+            )
+        return True
+
+    return Depends(_check)
 
 
 # ── Static frontend ──────────────────────────────────────────────────────
@@ -213,7 +241,7 @@ class IngestRequest(BaseModel):
     supersedes: str | None = None
 
 
-@app.post("/ingest", dependencies=[Depends(require_api_key)])
+@app.post("/ingest", dependencies=[Depends(require_api_key), _rate_limit("ingest")])
 async def ingest(
     req: IngestRequest,
     background_tasks: BackgroundTasks = None,
@@ -240,7 +268,9 @@ async def ingest(
     return {"task_id": task_id, "status": "accepted"}
 
 
-@app.post("/ingest/upload", dependencies=[Depends(require_api_key)])
+@app.post(
+    "/ingest/upload", dependencies=[Depends(require_api_key), _rate_limit("ingest")]
+)
 async def ingest_upload(
     file: UploadFile = File(...),
     background_tasks: BackgroundTasks = None,
@@ -279,7 +309,11 @@ async def ingest_status(task_id: str):
     return _tasks[task_id]
 
 
-@app.post("/query", response_model=None, dependencies=[Depends(require_api_key)])
+@app.post(
+    "/query",
+    response_model=None,
+    dependencies=[Depends(require_api_key), _rate_limit("query")],
+)
 async def query(req: QueryRequest):
     from reasoning.router import route_retrieval
     from reasoning.query_interpreter import interpret_query

@@ -19,11 +19,15 @@ _SRC = Path(__file__).resolve().parents[1]
 
 
 class DatabaseSettings(BaseSettings):
-    host: str
+    host: str = ""
     port: Annotated[int, Field(ge=1, le=65535)] = 8000
-    db_name: str
-    user: str
-    password: SecretStr
+    db_name: str = ""
+    user: str = ""
+    password: SecretStr = SecretStr("")
+    # Full connection string override. When set, ``conninfo`` returns it
+    # directly instead of assembling from individual fields. Handy for
+    # Render Blueprint's ``fromService.connectionString`` auto-wiring.
+    connection_string: SecretStr = SecretStr("")
     # When false, ``init_db()`` skips all DDL (CREATE EXTENSION/TABLE/INDEX,
     # ALTER). Set false for a read-only deployment against a FROZEN database
     # whose connecting role may lack DDL privileges (e.g. a restricted Supabase
@@ -34,10 +38,15 @@ class DatabaseSettings(BaseSettings):
     def conninfo(self) -> str:
         """libpq connection string used by psycopg across the project.
 
-        The ``password`` key is omitted when empty so passwordless local setups
-        (unix-socket peer/trust auth) work; including ``password=`` empty would
-        otherwise trip md5/scram auth with "no password supplied".
+        If ``connection_string`` is set, returns it directly (Render Blueprint
+        auto-wiring). Otherwise assembles from individual fields. The ``password``
+        key is omitted when empty so passwordless local setups (unix-socket
+        peer/trust auth) work; including ``password=`` empty would otherwise
+        trip md5/scram auth with "no password supplied".
         """
+        cs = self.connection_string.get_secret_value()
+        if cs:
+            return cs
         parts = [
             f"host={self.host}",
             f"port={self.port}",

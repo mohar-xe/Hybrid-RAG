@@ -12,28 +12,14 @@ services:
     branch: main
     healthCheckPath: /health
     envVars:
-      - key: DATABASE__HOST
+      # Auto-wired from the Postgres database below. Render only exposes
+      # connectionString, host, hostport, port — so we use connectionString
+      # and our settings parse it via DATABASE__CONNECTION_STRING.
+      - key: DATABASE__CONNECTION_STRING
         fromService:
           type: pserv
           name: hybrid-rag-db
-          property: host
-      - key: DATABASE__PORT
-        value: "5432"
-      - key: DATABASE__DB_NAME
-        fromService:
-          type: pserv
-          name: hybrid-rag-db
-          property: database
-      - key: DATABASE__USER
-        fromService:
-          type: pserv
-          name: hybrid-rag-db
-          property: user
-      - key: DATABASE__PASSWORD
-        fromService:
-          type: pserv
-          name: hybrid-rag-db
-          property: password
+          property: connectionString
       - key: GENERATOR__BASE_URL
         sync: false
       - key: GENERATOR__MODEL

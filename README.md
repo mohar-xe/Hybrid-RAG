@@ -289,25 +289,30 @@ The included [`render.yaml`](render.yaml) declares both the web service and a fr
 1. Push this repo to GitHub.
 2. In the [Render Dashboard](https://dashboard.render.com), click **New +** → **Blueprint**.
 3. Connect your GitHub repo. Render reads `render.yaml` and creates:
-   - A **Postgres database** (`hybrid-rag-db`, free tier)
-   - A **Web Service** (`hybrid-rag`, Docker, free tier)
-4. Before the first deploy, set the **sync: false** secrets in your service's **Environment** tab:
+   - A **Postgres database** (`hybrid-rag-db`, free tier, Singapore)
+   - A **Web Service** (`hybrid-rag`, Docker, free tier, Singapore)
+4. The database connection string is auto-wired via `DATABASE__CONNECTION_STRING`. No manual DB config needed.
+5. Enable pgvector — connect to your database (Render dashboard → Postgres → Connect → PSQL command) and run:
+   ```sql
+   CREATE EXTENSION IF NOT EXISTS vector;
+   ```
+6. Set the **API secrets** in your web service's **Environment** tab (each is marked `sync: false` — click the pencil to fill it in):
 
-| Variable | Where to get it |
-|----------|----------------|
+| Variable | What to put |
+|----------|-------------|
 | `GENERATOR__BASE_URL` | `https://openrouter.ai/api/v1` |
 | `GENERATOR__MODEL` | `google/gemini-3.6-flash` |
-| `GENERATOR__API_KEY` | [OpenRouter keys](https://openrouter.ai/keys) |
+| `GENERATOR__API_KEY` | [Get from OpenRouter](https://openrouter.ai/keys) |
 | `NER__BASE_URL` | `https://generativelanguage.googleapis.com/v1beta/openai` |
 | `NER__MODEL` | `gemini-3.6-flash` |
-| `NER__API_KEY` | [Gemini API key](https://makersuite.google.com/app/apikey) |
+| `NER__API_KEY` | [Get from Google AI Studio](https://makersuite.google.com/app/apikey) |
 | `EMBEDDING__API_BASE_URL` | `https://api.mistral.ai/v1` |
-| `EMBEDDING__API_KEY` | [Mistral keys](https://console.mistral.ai/api-keys/) |
+| `EMBEDDING__API_KEY` | [Get from Mistral](https://console.mistral.ai/api-keys/) |
 | `RERANKER__API_BASE_URL` | `https://api.mistral.ai/v1` |
-| `RERANKER__API_KEY` | Same Mistral key as above |
-| `API__API_KEY` | Pick a key to gate your API |
+| `RERANKER__API_KEY` | Same Mistral key |
+| `API__API_KEY` | Pick any secret string (e.g. `my-secret-key-123`) |
 
-5. Click **Apply**. Render builds the Dockerfile, provisions Postgres (with `pgvector`), and wires the connection env vars automatically.
+7. Go to your **Web Service** → **Manual Deploy** → **Deploy latest commit**. Wait for **Live** (~3 min).
 
 Your API is live at `https://hybrid-rag.onrender.com`.
 
@@ -319,15 +324,13 @@ Your API is live at `https://hybrid-rag.onrender.com`.
    - **Name:** `hybrid-rag`
    - **Environment:** `Docker`
    - **Plan:** Free
-4. Add a **Postgres database**: Render Dashboard → **New +** → **PostgreSQL** (free tier).
-5. Copy the internal connection string from your database dashboard and set these env vars on your web service:
+   - **Region:** Singapore
+4. Add a **Postgres database**: Render Dashboard → **New +** → **PostgreSQL** (free tier, Singapore).
+5. Enable pgvector — connect to your DB and run: `CREATE EXTENSION IF NOT EXISTS vector;`
+6. Copy the **Internal Connection String** from your database dashboard and set these env vars on your web service:
 
 ```
-DATABASE__HOST=<internal-host>
-DATABASE__PORT=5432
-DATABASE__DB_NAME=<db-name>
-DATABASE__USER=<user>
-DATABASE__PASSWORD=<password>
+DATABASE__CONNECTION_STRING=<paste-internal-connection-string>
 GENERATOR__BASE_URL=https://openrouter.ai/api/v1
 GENERATOR__MODEL=google/gemini-3.6-flash
 GENERATOR__API_KEY=<your-key>
@@ -344,11 +347,6 @@ RERANKER__API_MODEL=mistral-large-latest
 RERANKER__API_KEY=<your-key>
 API__API_KEY=<your-key>
 ```
-
-6. **Enable pgvector** — connect to your Render Postgres once (via `psql` or the Render shell) and run:
-   ```sql
-   CREATE EXTENSION IF NOT EXISTS vector;
-   ```
 
 7. Deploy. Render builds and starts the service.
 

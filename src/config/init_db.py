@@ -71,6 +71,16 @@ MIGRATIONS = [
     "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS doc_id UUID",
 ]
 
+SQL_USAGE_LOG = """CREATE TABLE IF NOT EXISTS usage_log (
+    id UUID PRIMARY KEY,
+    identifier TEXT NOT NULL,
+    action TEXT NOT NULL,
+    day DATE NOT NULL,
+    count INTEGER NOT NULL DEFAULT 1,
+    UNIQUE (identifier, action, day)
+)"""
+SQL_USAGE_INDEX = """CREATE INDEX IF NOT EXISTS idx_usage_lookup ON usage_log (identifier, action, day)"""
+
 
 def init_db():
     if not settings.database.init_schema:
@@ -89,6 +99,9 @@ def init_db():
                 LOGGER.info("Document clusters table initialized.")
                 cur.execute(SQL_DOCUMENT_QUESTIONS)
                 LOGGER.info("Document questions table initialized.")
+                cur.execute(SQL_USAGE_LOG)
+                cur.execute(SQL_USAGE_INDEX)
+                LOGGER.info("Usage log table initialized.")
                 for migration in MIGRATIONS:
                     cur.execute(migration)
                 LOGGER.info("Column migrations applied.")
