@@ -1,0 +1,200 @@
+{
+  "meta": {
+    "n": 1,
+    "seed": 42,
+    "top_k": 5,
+    "graph_ingested": true,
+    "generated_at": "20260723T184733Z"
+  },
+  "results": [
+    {
+      "mode": "direct",
+      "rerank": false,
+      "n": 1,
+      "top_k": 5,
+      "f1": 0.0,
+      "em": 0.0,
+      "recall": 0.0,
+      "hit_at_k": null,
+      "answer_in_context": null,
+      "graph_lift": null,
+      "latency": {
+        "mean_ms": 0.0036740002542501315,
+        "median_ms": 0.0036740002542501315,
+        "p95_ms": 0.0036740002542501315
+      },
+      "retrieval_latency": {
+        "mean_ms": 0.0,
+        "median_ms": 0.0,
+        "p95_ms": 0.0
+      },
+      "generation_latency": {
+        "mean_ms": 0.0036740002542501315,
+        "median_ms": 0.0036740002542501315,
+        "p95_ms": 0.0036740002542501315
+      }
+    },
+    {
+      "mode": "semantic",
+      "rerank": false,
+      "n": 1,
+      "top_k": 5,
+      "f1": 0.0,
+      "em": 0.0,
+      "recall": 0.0,
+      "hit_at_k": 0.0,
+      "answer_in_context": 0.0,
+      "graph_lift": null,
+      "latency": {
+        "mean_ms": 131.82895399995687,
+        "median_ms": 131.82895399995687,
+        "p95_ms": 131.82895399995687
+      },
+      "retrieval_latency": {
+        "mean_ms": 131.82060700000875,
+        "median_ms": 131.82060700000875,
+        "p95_ms": 131.82060700000875
+      },
+      "generation_latency": {
+        "mean_ms": 0.008346999948116718,
+        "median_ms": 0.008346999948116718,
+        "p95_ms": 0.008346999948116718
+      }
+    },
+    {
+      "mode": "semantic",
+      "rerank": true,
+      "n": 1,
+      "top_k": 5,
+      "f1": 0.0,
+      "em": 0.0,
+      "recall": 0.0,
+      "hit_at_k": 0.0,
+      "answer_in_context": 0.0,
+      "graph_lift": null,
+      "latency": {
+        "mean_ms": 20078.040285000043,
+        "median_ms": 20078.040285000043,
+        "p95_ms": 20078.040285000043
+      },
+      "retrieval_latency": {
+        "mean_ms": 20078.024035,
+        "median_ms": 20078.024035,
+        "p95_ms": 20078.024035
+      },
+      "generation_latency": {
+        "mean_ms": 0.016250000044237822,
+        "median_ms": 0.016250000044237822,
+        "p95_ms": 0.016250000044237822
+      }
+    },
+    {
+      "mode": "semantic_bm25",
+      "rerank": false,
+      "n": 1,
+      "top_k": 5,
+      "f1": 0.0,
+      "em": 0.0,
+      "recall": 0.0,
+      "hit_at_k": 0.0,
+      "answer_in_context": 0.0,
+      "graph_lift": null,
+      "latency": {
+        "mean_ms": 78.04307400010657,
+        "median_ms": 78.04307400010657,
+        "p95_ms": 78.04307400010657
+      },
+      "retrieval_latency": {
+        "mean_ms": 78.03243799980919,
+        "median_ms": 78.03243799980919,
+        "p95_ms": 78.03243799980919
+      },
+      "generation_latency": {
+        "mean_ms": 0.010636000297381543,
+        "median_ms": 0.010636000297381543,
+        "p95_ms": 0.010636000297381543
+      }
+    },
+    {
+      "mode": "semantic_bm25",
+      "rerank": true,
+      "n": 1,
+      "top_k": 5,
+      "f1": 0.0,
+      "em": 0.0,
+      "recall": 0.0,
+      "hit_at_k": 0.0,
+      "answer_in_context": 0.0,
+      "graph_lift": null,
+      "latency": {
+        "mean_ms": 20101.085507000334,
+        "median_ms": 20101.085507000334,
+        "p95_ms": 20101.085507000334
+      },
+      "retrieval_latency": {
+        "mean_ms": 20101.078629000313,
+        "median_ms": 20101.078629000313,
+        "p95_ms": 20101.078629000313
+      },
+      "generation_latency": {
+        "mean_ms": 0.006878000021970365,
+        "median_ms": 0.006878000021970365,
+        "p95_ms": 0.006878000021970365
+      }
+    },
+    {
+      "mode": "all_three",
+      "rerank": false,
+      "n": 1,
+      "top_k": 5,
+      "f1": 0.0,
+      "em": 0.0,
+      "recall": 0.0,
+      "hit_at_k": 0.0,
+      "answer_in_context": 0.0,
+      "graph_lift": 0.0,
+      "latency": {
+        "mean_ms": 266.99996600018494,
+        "median_ms": 266.99996600018494,
+        "p95_ms": 266.99996600018494
+      },
+      "retrieval_latency": {
+        "mean_ms": 266.9838820002042,
+        "median_ms": 266.9838820002042,
+        "p95_ms": 266.9838820002042
+      },
+      "generation_latency": {
+        "mean_ms": 0.01608399998076493,
+        "median_ms": 0.01608399998076493,
+        "p95_ms": 0.01608399998076493
+      }
+    },
+    {
+      "mode": "all_three",
+      "rerank": true,
+      "n": 1,
+      "top_k": 5,
+      "f1": 0.0,
+      "em": 0.0,
+      "recall": 0.0,
+      "hit_at_k": 0.0,
+      "answer_in_context": 0.0,
+      "graph_lift": 0.0,
+      "latency": {
+        "mean_ms": 20273.373913999876,
+        "median_ms": 20273.373913999876,
+        "p95_ms": 20273.373913999876
+      },
+      "retrieval_latency": {
+        "mean_ms": 20273.36701000013,
+        "median_ms": 20273.36701000013,
+        "p95_ms": 20273.36701000013
+      },
+      "generation_latency": {
+        "mean_ms": 0.006903999747009948,
+        "median_ms": 0.006903999747009948,
+        "p95_ms": 0.006903999747009948
+      }
+    }
+  ]
+}

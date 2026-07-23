@@ -36,6 +36,8 @@ def ingest_corpus(
 
     Returns counts: ``{"titles", "chunks", "graph_triplets", "graph_failed"}``.
     """
+    import uuid as _uuid
+
     from config.init_db import init_db
     from ingestion.chunker import chunk_text, chunk_enrich
     from ingestion.document_cluster import create_document_cluster
@@ -60,8 +62,11 @@ def ingest_corpus(
         if not text:
             continue
 
+        # Use a deterministic UUID derived from title so re-runs are idempotent.
+        doc_id = str(_uuid.uuid5(_uuid.NAMESPACE_DNS, title))
+
         # Chunk -> enrich -> store, with doc_id wired for doc-level routing.
-        chunks = chunk_enrich(chunk_text(text), "PDF", title, doc_id=title)
+        chunks = chunk_enrich(chunk_text(text), "PDF", title, doc_id=doc_id)
         for i, chunk in enumerate(chunks):
             chunk.chunk_id = f"{title}::{i}"
         store_chunks(chunks)
@@ -70,7 +75,7 @@ def ingest_corpus(
 
         # Create a minimal document cluster entry for doc-level routing.
         create_document_cluster(
-            doc_id=title,
+            doc_id=doc_id,
             source_id=title,
             source_type="hotpotqa",
             metadata={

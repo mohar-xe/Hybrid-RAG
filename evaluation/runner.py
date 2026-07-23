@@ -14,8 +14,6 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 
-from __future__ import annotations
-
 from evaluation import config, metrics
 from evaluation.modes import run_query
 

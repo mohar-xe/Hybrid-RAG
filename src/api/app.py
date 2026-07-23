@@ -427,15 +427,20 @@ async def query(req: QueryRequest):
     t.end(items=len(chunks))
 
     # 6-7: graph
-    t.start("graph_expansion")
+    t.start("extract_entities")
     graph_facts = ""
     if strategy.get("use_graph", False):
         from graph.entity_extraction import extract_query_entities
 
         entities = extract_query_entities(req.question)
+        t.end(items=len(entities))
+
+        t.start("graph_expansion")
         if entities:
             graph_facts = get_entity_context(entities)
-    t.end(items=len(graph_facts))
+        t.end(items=len(graph_facts))
+    else:
+        t.end(items=0)
 
     # 8: assemble context
     t.start("context_build")
@@ -464,6 +469,7 @@ async def query(req: QueryRequest):
         }
 
         async def _stream_answer():
+            _gen_start = time.monotonic()
             meta = {
                 "type": "meta",
                 "chunks": chunks_data,
@@ -475,6 +481,14 @@ async def query(req: QueryRequest):
             for token in generate(req.question, context, stream=True):
                 if isinstance(token, str):
                     yield f"data: {_json.dumps({'type': 'token', 'text': token})}\n\n"
+            gen_ms = round((time.monotonic() - _gen_start) * 1000)
+            # send updated metrics with generate stage included
+            updated = dict(metrics_data)
+            updated["stages"] = list(updated["stages"]) + [
+                {"name": "generate", "ms": gen_ms, "items": 0}
+            ]
+            updated["total_ms"] = round((time.monotonic() - _t_start) * 1000)
+            yield f"data: {_json.dumps({'type': 'meta', 'metrics': updated})}\n\n"
             yield "data: {\"type\":\"done\"}\n\n"
 
         return StreamingResponse(

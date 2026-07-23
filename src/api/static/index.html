@@ -6,6 +6,7 @@
 <title>Hybrid-RAG</title>
 <link rel="stylesheet" href="https://unpkg.com/vis-network@9.1.9/styles/vis-network.min.css">
 <script src="https://unpkg.com/vis-network@9.1.9/dist/vis-network.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js"></script>
 <style>
 :root {
   --bg: #282828;
@@ -692,7 +693,7 @@ askBtn.addEventListener('click', async () => {
         if (data.type === 'token') {
           fullAnswer += data.text;
           // Build the full HTML each time (replace existing bubble)
-          html = fullAnswer.replace(/\n/g, '<br>');
+          html = marked.parse(fullAnswer);
           if (meta && meta.citations && meta.citations.length) {
             html += '<br><br><div class="ref">Sources: ' + meta.citations.map(c =>
               `[${c.ref}] ${c.source.split('/').pop() || c.source}`
@@ -701,9 +702,9 @@ askBtn.addEventListener('click', async () => {
           if (meta && meta.chunks && meta.chunks.length) {
             html += collapsible('chunks-' + Date.now(), 'Retrieved Chunks', meta.chunks.length, chunksHTML(meta.chunks));
           }
-          if (meta && meta.graph_facts) {
+          { // always render graph viz
             const graphId2 = 'graph-' + Date.now();
-            const facts2 = meta.graph_facts.split('\n').filter(l => l.trim());
+            const facts2 = (meta && meta.graph_facts) ? meta.graph_facts.split('\n').filter(l => l.trim()) : [];
             html += collapsible(graphId2 + '-col', 'Knowledge Graph', facts2.length,
               '<div class="graph-container" id="' + graphId2 + '"></div>', true);
             setTimeout(() => renderGraph(graphId2, facts2), 50);
