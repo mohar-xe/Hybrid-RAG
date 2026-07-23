@@ -20,6 +20,7 @@ _COLUMNS = [
     ("recall", "Recall"),
     ("hit_at_k", "Hit@k (top)"),
     ("answer_in_context", "AnsInCtx"),
+    ("graph_lift", "GraphLift"),
     ("latency_mean_ms", "Latency mean (ms)"),
     ("latency_p95_ms", "Latency p95 (ms)"),
 ]
@@ -44,6 +45,7 @@ def _flatten(result: dict) -> dict:
         "recall": result["recall"],
         "hit_at_k": result["hit_at_k"],
         "answer_in_context": result["answer_in_context"],
+        "graph_lift": result.get("graph_lift"),
         "latency_mean_ms": latency.get("mean_ms"),
         "latency_p95_ms": latency.get("p95_ms"),
     }

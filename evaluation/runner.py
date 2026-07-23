@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 
+from __future__ import annotations
+
 from evaluation import config, metrics
 from evaluation.modes import run_query
 
@@ -46,6 +48,7 @@ class RunResult:
     recall: float
     hit_at_k: float | None
     answer_in_context: float | None
+    graph_lift: float | None = None
     latency: dict = field(default_factory=dict)
     retrieval_latency: dict = field(default_factory=dict)
     generation_latency: dict = field(default_factory=dict)
@@ -179,5 +182,16 @@ def run_all(
             if on_progress:
                 on_progress(spec.label, i, len(records))
         results.append(_score_run(spec, outcomes, top_k))
+
+    # Compute graph lift: for each retrieval mode, compare F1 with/without graph.
+    # Semantic_bm25 and semantic share the same no-graph baseline; all_three is the
+    # only mode that adds graph. Compare all_three vs semantic_bm25 (same BM25+vector
+    # foundation, one adds graph). Delta per query then averaged.
+    all_three_results = [r for r in results if r.mode == "all_three"]
+    semantic_bm25_results = [r for r in results if r.mode == "semantic_bm25"]
+    for graph_run in all_three_results:
+        paired = [r for r in semantic_bm25_results if r.rerank == graph_run.rerank]
+        if paired:
+            graph_run.graph_lift = graph_run.f1 - paired[0].f1
 
     return results

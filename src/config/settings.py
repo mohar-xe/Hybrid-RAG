@@ -249,7 +249,7 @@ class ContextSettings(BaseSettings):
     context length for the system prompt, the question, and the answer.
     """
 
-    max_tokens: Annotated[int, Field(ge=256)] = 3000
+    max_tokens: Annotated[int, Field(ge=256)] = 6000
     # Words -> approx tokens multiplier used to estimate chunk size without a
     # tokenizer dependency. ~1.3 is a reasonable English heuristic.
     token_ratio: Annotated[float, Field(gt=0.0)] = 1.3

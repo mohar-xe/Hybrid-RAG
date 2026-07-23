@@ -46,7 +46,7 @@ def run_query(
     # Closed-book baseline: parametric knowledge only, no retrieval.
     if mode_name == "direct":
         t0 = time.perf_counter()
-        answer = generate(question, closed_book=True)
+        answer = generate(question, closed_book=True, eval_mode=True)
         gen_ms = (time.perf_counter() - t0) * 1000.0
         return QueryOutcome(answer=str(answer), generation_ms=gen_ms)
 
@@ -69,13 +69,14 @@ def run_query(
     context, _citations = build_context(result.chunks, result.graph_facts)
 
     t1 = time.perf_counter()
-    answer = generate(question, context)
+    answer = generate(question, context, eval_mode=True)
     generation_ms = (time.perf_counter() - t1) * 1000.0
 
     return QueryOutcome(
         answer=str(answer),
         retrieved_titles=[c.source_id for c in result.chunks],
-        contexts=[c.text for c in result.chunks],
+        contexts=[c.text for c in result.chunks]
+        + ([result.graph_facts] if result.graph_facts else []),
         retrieval_ms=retrieval_ms,
         generation_ms=generation_ms,
     )

@@ -443,8 +443,42 @@ async def query(req: QueryRequest):
     t.end(items=len(citations))
 
     if req.stream:
+        import json as _json
+
+        chunks_data = [
+            {"score": c.score, "source": c.source_id, "preview": c.text[:200]}
+            for c in chunks
+        ]
+        citations_data = [
+            {"ref": c.ref_id, "source": c.source_id, "preview": c.text_preview}
+            for c in citations
+        ]
+        metrics_data = {
+            "total_ms": round((time.monotonic() - _t_start) * 1000),
+            "stages": t.stages,
+            "models": {
+                "embedder": settings.embedding.backend,
+                "reranker": settings.reranker.backend,
+                "generator": settings.generator.backend,
+            },
+        }
+
+        async def _stream_answer():
+            meta = {
+                "type": "meta",
+                "chunks": chunks_data,
+                "graph_facts": graph_facts,
+                "citations": citations_data,
+                "metrics": metrics_data,
+            }
+            yield f"data: {_json.dumps(meta)}\n\n"
+            for token in generate(req.question, context, stream=True):
+                if isinstance(token, str):
+                    yield f"data: {_json.dumps({'type': 'token', 'text': token})}\n\n"
+            yield "data: {\"type\":\"done\"}\n\n"
+
         return StreamingResponse(
-            generate(req.question, context, stream=True), media_type="text/plain"
+            _stream_answer(), media_type="text/event-stream"
         )
 
     t.start("generate")

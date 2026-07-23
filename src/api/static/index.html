@@ -654,7 +654,7 @@ askBtn.addEventListener('click', async () => {
   startLog();
 
   try {
-    const r = await apiWithAuth('POST', '/query', { question: q, top_k: 5 });
+    const r = await apiWithAuth('POST', '/query', { question: q, top_k: 5, stream: true });
     removeThinking();
     if (!r.ok) {
       const err = await r.json().catch(() => ({}));
@@ -662,35 +662,78 @@ askBtn.addEventListener('click', async () => {
       logFooter.textContent = 'failed';
       return;
     }
-    const d = await r.json();
 
-    if (d.metrics && d.metrics.stages) updateLog(d.metrics.stages);
+    // SSE streaming response
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let fullAnswer = '';
+    let meta = null;
+    let html = '';
 
-    let html = d.answer.replace(/\n/g, '<br>');
-    if (d.citations && d.citations.length) {
-      html += '<br><br><div class="ref">Sources: ' + d.citations.map(c =>
-        `[${c.ref}] ${c.source.split('/').pop() || c.source}`
-      ).join(', ') + '</div>';
-    }
-    if (d.faithfulness != null) {
-      html += `<div class="ref">Faithfulness: ${(d.faithfulness * 100).toFixed(0)}%</div>`;
-    }
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
 
-    if (d.chunks && d.chunks.length) {
-      html += collapsible('chunks-' + Date.now(), 'Retrieved Chunks', d.chunks.length, chunksHTML(d.chunks));
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const data = JSON.parse(line.slice(6));
+
+        if (data.type === 'meta') {
+          meta = data;
+          if (data.metrics && data.metrics.stages) updateLog(data.metrics.stages);
+          continue;
+        }
+
+        if (data.type === 'token') {
+          fullAnswer += data.text;
+          // Build the full HTML each time (replace existing bubble)
+          html = fullAnswer.replace(/\n/g, '<br>');
+          if (meta && meta.citations && meta.citations.length) {
+            html += '<br><br><div class="ref">Sources: ' + meta.citations.map(c =>
+              `[${c.ref}] ${c.source.split('/').pop() || c.source}`
+            ).join(', ') + '</div>';
+          }
+          if (meta && meta.chunks && meta.chunks.length) {
+            html += collapsible('chunks-' + Date.now(), 'Retrieved Chunks', meta.chunks.length, chunksHTML(meta.chunks));
+          }
+          if (meta && meta.graph_facts) {
+            const graphId2 = 'graph-' + Date.now();
+            const facts2 = meta.graph_facts.split('\n').filter(l => l.trim());
+            html += collapsible(graphId2 + '-col', 'Knowledge Graph', facts2.length,
+              '<div class="graph-container" id="' + graphId2 + '"></div>', true);
+            setTimeout(() => renderGraph(graphId2, facts2), 50);
+          }
+          if (meta && meta.metrics) {
+            html += metricsToHTML(meta.metrics);
+          }
+          // Replace the existing thinking/streaming message
+          const existing = document.querySelector('.msg.streaming .bubble');
+          if (existing) {
+            existing.innerHTML = html;
+          } else {
+            const d = document.createElement('div');
+            d.className = 'msg assistant streaming';
+            d.innerHTML = '<div class="bubble">' + html + '</div>';
+            chat.appendChild(d);
+          }
+          chat.scrollTop = chat.scrollHeight;
+        }
+
+        if (data.type === 'done') {
+          // Finalize: replace streaming bubble with final one (removes streaming class)
+          const streaming = document.querySelector('.msg.streaming');
+          if (streaming) {
+            streaming.classList.remove('streaming');
+            streaming.className = 'msg assistant';
+          }
+        }
+      }
     }
-    if (d.graph_facts) {
-      const graphId = 'graph-' + Date.now();
-      const facts = d.graph_facts.split('\n').filter(l => l.trim());
-      html += collapsible(graphId + '-col', 'Knowledge Graph', facts.length,
-        '<div class="graph-container" id="' + graphId + '"></div>', true);
-      // Render after the DOM is in place
-      setTimeout(() => renderGraph(graphId, facts), 50);
-    }
-    if (d.metrics) {
-      html += metricsToHTML(d.metrics);
-    }
-    addMsg('assistant', html);
   } catch (e) {
     removeThinking();
     addMsg('system', 'Request failed: ' + e.message);

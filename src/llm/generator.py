@@ -19,26 +19,39 @@ Rules:
 - Be concise but thorough.
 - Output ONLY the final answer. Do NOT show any reasoning, chain-of-thought, or internal thinking — just the answer itself with citations."""
 
+# Short-answer prompt for evaluation (HotpotQA / SQuAD style). The model must
+# output the exact answer span — typically a name, number, or short phrase —
+# without explanation, citation markers, or full-sentence framing. This is
+# critical for exact-match and F1 scoring that evaluates against gold spans.
+EVAL_SYSTEM_PROMPT = """You are a precise extractive QA system. Answer the question using ONLY the provided context.
+
+Rules:
+- Output ONLY the exact answer span — one or a few words, never a full sentence.
+- Do NOT add explanations, citations, or any other text.
+- If the context does not contain the answer, output "None".
+- Never use your own knowledge."""
+
 # Closed-book: no retrieval context is supplied. Used by the evaluation's
 # `direct` baseline to measure the model's parametric knowledge alone.
 CLOSED_BOOK_SYSTEM_PROMPT = """You are a knowledgeable assistant. Answer the question directly from your own knowledge.
 
 Rules:
-- Give the most likely answer even if you are uncertain.
-- Be concise: answer in as few words as the question allows.
-- Do not ask for clarification and do not mention missing context."""
+- Output ONLY the exact answer span — one or a few words.
+- Do NOT add any explanations, citations, or full sentences.
+- If you do not know the answer, output "None"."""
 
 
 def _build_messages(
-    query: str, context: str = "", *, closed_book: bool = False
+    query: str, context: str = "", *, closed_book: bool = False, eval_mode: bool = False
 ) -> list[dict]:
     if closed_book:
         return [
             {"role": "system", "content": CLOSED_BOOK_SYSTEM_PROMPT},
             {"role": "user", "content": query},
         ]
+    prompt = EVAL_SYSTEM_PROMPT if eval_mode else SYSTEM_PROMPT
     return [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": prompt},
         {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {query}"},
     ]
 
@@ -95,13 +108,15 @@ def generate(
     *,
     stream: bool = True,
     closed_book: bool = False,
+    eval_mode: bool = False,
 ) -> str | Generator[str, None, None]:
     """Generate an answer, trying the remote API first then falling back to Ollama.
 
     Returns a generator (streaming) or a string (non-streaming). The backend
-    tag is logged internally.
+    tag is logged internally. Pass ``eval_mode=True`` for extractive short-answer
+    evaluation (HotpotQA/SQuAD) — the model outputs only the answer span.
     """
-    messages = _build_messages(query, context, closed_book=closed_book)
+    messages = _build_messages(query, context, closed_book=closed_book, eval_mode=eval_mode)
 
     if stream:
         try:

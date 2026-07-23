@@ -61,6 +61,8 @@ services:
         value: "false"
       - key: RERANKER__FALLBACK_ENABLED
         value: "false"
+      - key: GRAPH__PER_HOP_NEIGHBORS
+        value: "5"
       - key: METADATA__FALLBACK_ENABLED
         value: "false"
       - key: METADATA__FALLBACK_BACKEND
