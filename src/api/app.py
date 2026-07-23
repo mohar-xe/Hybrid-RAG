@@ -552,6 +552,15 @@ async def health():
             pass
 
     graph_ok = settings.graph.db_path.exists()
+    entity_count = 0
+    if graph_ok:
+        try:
+            from retrieval.kuzu_store import get_connection
+            _db, _conn = get_connection()
+            result = _conn.execute("MATCH (e:Entity) RETURN count(*) AS cnt")
+            entity_count = result.get_next()[0]
+        except Exception:
+            pass
 
     status = (
         "degraded" if (not db_ok or (ollama_needed and not ollama_ok)) else "healthy"
@@ -563,4 +572,5 @@ async def health():
         if ollama_needed
         else "not_configured",
         "graph": "ok" if graph_ok else "not_initialized",
+        "entities": entity_count,
     }
