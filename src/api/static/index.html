@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Hybrid-RAG</title>
+<link rel="stylesheet" href="https://unpkg.com/vis-network@9.1.9/styles/vis-network.min.css">
+<script src="https://unpkg.com/vis-network@9.1.9/dist/vis-network.min.js"></script>
 <style>
 :root {
   --bg: #282828;
@@ -303,6 +305,17 @@ header h1 span { color: var(--fg1); font-weight: 400; }
   display: flex; gap: 12px; color: var(--fg1); font-size: 11px; margin-bottom: 4px;
 }
 .chunk-item .chunk-meta .score { color: var(--aqua); font-weight: 600; }
+
+.graph-container {
+  min-height: 280px;
+  height: 320px;
+  background: var(--bg0);
+  border: 1px solid var(--bg2);
+  border-radius: 6px;
+  position: relative;
+  overflow: hidden;
+}
+.graph-container canvas { display: block; }
 
 .metrics { margin-top: 8px; }
 .metrics-toggle {
@@ -667,7 +680,12 @@ askBtn.addEventListener('click', async () => {
       html += collapsible('chunks-' + Date.now(), 'Retrieved Chunks', d.chunks.length, chunksHTML(d.chunks));
     }
     if (d.graph_facts) {
-      html += collapsible('graph-' + Date.now(), 'Graph Triplets', d.graph_facts.split('\n').length, '<pre>' + d.graph_facts + '</pre>');
+      const graphId = 'graph-' + Date.now();
+      const facts = d.graph_facts.split('\n').filter(l => l.trim());
+      html += collapsible(graphId + '-col', 'Knowledge Graph', facts.length,
+        '<div class="graph-container" id="' + graphId + '"></div>', true);
+      // Render after the DOM is in place
+      setTimeout(() => renderGraph(graphId, facts), 50);
     }
     if (d.metrics) {
       html += metricsToHTML(d.metrics);
@@ -704,6 +722,41 @@ function metricsToHTML(m) {
       <div class="metrics-footer">${total}ms total${footer ? ' · ' + footer : ''}</div>
     </div>
   </div>`;
+}
+
+function renderGraph(containerId, factLines) {
+  const container = document.getElementById(containerId);
+  if (!container || !factLines || !factLines.length) return;
+
+  // Parse triplets: "subject relation object"
+  const nodesMap = {};
+  const edges = [];
+  const colorEntity = '#458588'; // blue
+  const colorConcept = '#689d6a'; // green
+  const colorEdge = '#928374';
+
+  for (const line of factLines) {
+    const parts = line.match(/^(.*?)\s+(\S+)\s+(.*)$/);
+    if (!parts) continue;
+    const [_m, subj, rel, obj] = parts;
+    if (!nodesMap[subj]) nodesMap[subj] = { id: subj, label: subj, color: colorEntity, shape: 'ellipse', font: { color: '#ebdbb2', size: 12 } };
+    if (!nodesMap[obj]) nodesMap[obj] = { id: obj, label: obj, color: colorConcept, shape: 'box', font: { color: '#ebdbb2', size: 12 } };
+    edges.push({ from: subj, to: obj, label: rel, color: { color: colorEdge }, font: { color: '#a89984', size: 10, strokeWidth: 0 }, width: 1, arrows: 'to' });
+  }
+
+  const data = {
+    nodes: new vis.DataSet(Object.values(nodesMap)),
+    edges: new vis.DataSet(edges),
+  };
+  const options = {
+    nodes: { borderWidth: 1, borderWidthSelected: 2, chosen: true },
+    edges: { smooth: { type: 'curvedCW', roundness: 0.15 } },
+    physics: { solver: 'forceAtlas2Based', forceAtlas2Based: { gravitationalConstant: -40, centralGravity: 0.005, springLength: 160, springConstant: 0.02 }, stabilization: { iterations: 200 } },
+    interaction: { hover: true, tooltipDelay: 200, zoomView: true, dragView: true },
+    layout: { improvedLayout: true },
+    background: '#1d2021',
+  };
+  new vis.Network(container, data, options);
 }
 
 async function init() {

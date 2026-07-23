@@ -273,6 +273,12 @@ def _run_ingestion(
                     conn=graph_conn,
                 )
 
+        # Mark the last stage as done so the frontend sees completion
+        for s in _tasks[task_id].get("stages", []):
+            if s["label"] == _INGEST_STAGES[-1]:
+                s["done"] = True
+                break
+
         _tasks[task_id].update(
             {"status": "completed", "chunks": len(chunks), "failed_extractions": failed}
         )
