@@ -306,7 +306,7 @@ async def ingest(
             detail=f"Unsupported source_type: {req.source_type} (only pdf is supported)",
         )
 
-    file_path = _validate_ingest_path(file_path)
+    file_path = _validate_ingest_path(req.file_path)
 
     task_id = str(uuid.uuid4())
     _tasks[task_id] = {"status": "accepted"}
@@ -426,7 +426,29 @@ async def query(req: QueryRequest):
     chunks = rerank(semantic_query, chunks, top_k=req.top_k)
     t.end(items=len(chunks))
 
-    # 6-7: graph
+    # 6: structural expansion (small-to-big graph traversal)
+    t.start("graph_expansion")
+    expanded_chunks = []
+    try:
+        chunk_ids = [c.chunk_id for c in chunks]
+        siblings = structural_expansion(chunk_ids)
+        if siblings:
+            from retrieval.pgvector import RetrievedChunk
+
+            for cid, text, score in siblings:
+                expanded_chunks.append(
+                    RetrievedChunk(
+                        chunk_id=cid,
+                        text=text,
+                        source_id="",
+                        score=score,
+                    )
+                )
+    except Exception as e:
+        LOGGER.warning("Structural expansion failed (continuing): %s", e)
+    t.end(items=len(expanded_chunks))
+
+    # 7: graph facts (entity context)
     t.start("extract_entities")
     graph_facts = ""
     from graph.entity_extraction import extract_query_entities
@@ -434,14 +456,13 @@ async def query(req: QueryRequest):
     entities = extract_query_entities(req.question)
     t.end(items=len(entities))
 
-    t.start("graph_expansion")
+    t.start("context_build")
     if entities:
         graph_facts = get_entity_context(entities)
-    t.end(items=len(graph_facts))
 
-    # 8: assemble context
-    t.start("context_build")
-    context, citations = build_context(chunks, graph_facts)
+    # 8: assemble context (reranked chunks + expanded siblings + graph facts)
+    all_chunks = chunks + expanded_chunks
+    context, citations = build_context(all_chunks, graph_facts)
     t.end(items=len(citations))
 
     if req.stream:

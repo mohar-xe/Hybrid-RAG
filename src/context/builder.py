@@ -39,7 +39,10 @@ def build_context(
 
     # Reserve budget for the graph-knowledge block so the total stays under cap.
     graph_tokens = len(graph_facts.split()) * token_ratio if graph_facts else 0.0
-    chunk_budget = max_tokens - graph_tokens
+    # Guarantee chunks get at least 30% of the budget even if graph_facts are large;
+    # otherwise a huge knowledge block can squeeze out all document evidence.
+    min_chunk_budget = max_tokens * 0.3
+    chunk_budget = max(min_chunk_budget, max_tokens - graph_tokens)
 
     for i, chunk in enumerate(chunks, start=1):
         approx_tokens = len(chunk.text.split()) * token_ratio

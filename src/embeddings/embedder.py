@@ -140,6 +140,10 @@ def _run_backend(name: str, chunks: list[str], dim: int, batch_size: int) -> np.
     fn = _BACKENDS.get(name)
     if fn is None:
         raise EmbeddingError(f"Unknown embedding backend: {name!r}")
+    # sentence_transformers backend manages its own model internally; passing
+    # ``model=`` to it would cause a TypeError.
+    if name == "sentence_transformers":
+        return fn(chunks, dim=dim, batch_size=batch_size)
     return fn(chunks, model=_settings.model, dim=dim, batch_size=batch_size)
 
 

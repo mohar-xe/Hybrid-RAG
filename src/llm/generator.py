@@ -122,6 +122,8 @@ def generate(
         try:
             return _api_stream_generate(messages)
         except Exception as exc:
+            if not settings.generator.fallback_enabled:
+                raise
             LOGGER.warning(
                 "Generator API stream failed (%s), falling back to Ollama...", exc
             )

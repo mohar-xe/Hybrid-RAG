@@ -774,7 +774,9 @@ function renderGraph(containerId, factLines) {
   const container = document.getElementById(containerId);
   if (!container || !factLines || !factLines.length) return;
 
-  // Parse triplets: "subject relation object"
+  // Parse triplets: "subject relation_type object"
+  // Relation types always contain underscores (based_on, instance_of, etc.)
+  // so we find the first underscore-word to split subject from relation+object.
   const nodesMap = {};
   const edges = [];
   const colorEntity = '#458588'; // blue
@@ -782,13 +784,34 @@ function renderGraph(containerId, factLines) {
   const colorEdge = '#928374';
 
   for (const line of factLines) {
-    const parts = line.match(/^(.*?)\s+(\S+)\s+(.*)$/);
-    if (!parts) continue;
-    const [_m, subj, rel, obj] = parts;
+    // Strategy: split into words, find the first word containing underscore
+    // (that's the relation), everything before is subject, everything after is object
+    const words = line.trim().split(/\s+/);
+    let relIdx = words.findIndex(w => w.includes('_'));
+    let subj, rel, obj;
+    if (relIdx > 0) {
+      subj = words.slice(0, relIdx).join(' ');
+      rel = words[relIdx];
+      obj = words.slice(relIdx + 1).join(' ');
+    } else {
+      // Fallback: treat second-to-last word as relation (best-effort)
+      if (words.length >= 3) {
+        subj = words.slice(0, -2).join(' ');
+        rel = words[words.length - 2];
+        obj = words[words.length - 1];
+      } else {
+        continue;
+      }
+    }
+    if (!subj || !rel || !obj) continue;
+
     if (!nodesMap[subj]) nodesMap[subj] = { id: subj, label: subj, color: colorEntity, shape: 'ellipse', font: { color: '#ebdbb2', size: 12 } };
     if (!nodesMap[obj]) nodesMap[obj] = { id: obj, label: obj, color: colorConcept, shape: 'box', font: { color: '#ebdbb2', size: 12 } };
-    edges.push({ from: subj, to: obj, label: rel, color: { color: colorEdge }, font: { color: '#a89984', size: 10, strokeWidth: 0 }, width: 1, arrows: 'to' });
+    const relLabel = rel.replace(/_/g, ' ');
+    edges.push({ from: subj, to: obj, label: relLabel, color: { color: colorEdge }, font: { color: '#a89984', size: 10, strokeWidth: 0 }, width: 1, arrows: 'to' });
   }
+
+  if (Object.keys(nodesMap).length === 0) return;
 
   const data = {
     nodes: new vis.DataSet(Object.values(nodesMap)),

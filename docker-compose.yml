@@ -21,6 +21,8 @@ services:
     ports:
       - "8000:8000"
     environment:
+      # --- Port ---
+      PORT: "8000"
       # --- Database ---
       DATABASE__HOST: db
       DATABASE__PORT: 5432

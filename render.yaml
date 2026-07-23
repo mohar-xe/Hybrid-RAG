@@ -45,7 +45,7 @@ services:
       - key: RERANKER__API_BASE_URL
         value: "https://api.jina.ai/v1/rerank"
       - key: RERANKER__API_KEY
-        value: "jina_bd49aa811ec54aa981b91f5b39298c8fZs8Mjov5FpHymASlq9BN2Qerkm-m"
+        sync: false
       # ------------------------------------------------------------------
       # Disable all local-model fallbacks — Docker has no Ollama or spaCy.
       # The primary API is the only path; a failure -> a clean error, not a
