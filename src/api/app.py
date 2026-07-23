@@ -429,18 +429,15 @@ async def query(req: QueryRequest):
     # 6-7: graph
     t.start("extract_entities")
     graph_facts = ""
-    if strategy.get("use_graph", False):
-        from graph.entity_extraction import extract_query_entities
+    from graph.entity_extraction import extract_query_entities
 
-        entities = extract_query_entities(req.question)
-        t.end(items=len(entities))
+    entities = extract_query_entities(req.question)
+    t.end(items=len(entities))
 
-        t.start("graph_expansion")
-        if entities:
-            graph_facts = get_entity_context(entities)
-        t.end(items=len(graph_facts))
-    else:
-        t.end(items=0)
+    t.start("graph_expansion")
+    if entities:
+        graph_facts = get_entity_context(entities)
+    t.end(items=len(graph_facts))
 
     # 8: assemble context
     t.start("context_build")

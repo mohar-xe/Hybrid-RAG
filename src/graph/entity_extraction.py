@@ -631,23 +631,18 @@ def extract_query_entities_llm(query: str) -> list[str]:
 def extract_query_entities(query: str, *, use_llm_fallback: bool = True) -> list[str]:
     """Canonical query entity extractor used to seed graph retrieval.
 
-    Hybrid, cheap-first:
-      1. YAKE keyphrases — fast, local, no API cost. If it returns anything,
-         those are the seeds ("if YAKE produces entities, good").
-      2. Otherwise (YAKE empty) fall back to the LLM NER for better recall.
+    LLM-first, YAKE-fallback (opposite of the old default — deployment has
+    a remote NER API but no YAKE model files). Falls back to YAKE keyphrases
+    when the LLM call fails.
 
-    The LLM step is best-effort: a missing API key or a transient error degrades
-    to an empty list (the query still answers, just without graph facts). Pass
-    ``use_llm_fallback=False`` for callers that must stay cheap/offline (e.g. the
-    router's complexity signal), restricting extraction to YAKE only.
+    Pass ``use_llm_fallback=False`` for callers that must stay cheap/offline
+    (e.g. the router's complexity signal), restricting extraction to YAKE only.
     """
+    if use_llm_fallback:
+        try:
+            return extract_query_entities_llm(query)
+        except Exception as exc:
+            LOGGER.warning(f"LLM query-entity NER failed, falling back to YAKE: {exc}")
+
     phrases = _dedupe_preserve(extract_keyphrases_yake(query))
-    if phrases:
-        return phrases
-    if not use_llm_fallback:
-        return []
-    try:
-        return extract_query_entities_llm(query)
-    except Exception as exc:
-        LOGGER.warning(f"LLM query-entity fallback unavailable: {exc}")
-        return []
+    return phrases
