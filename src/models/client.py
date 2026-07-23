@@ -36,7 +36,8 @@ class ApiClient:
         )
         if not content and reasoning:
             LOGGER.info("Answer found in reasoning field, not content.")
-        return reasoning + content
+            return reasoning
+        return content
 
     def chat_stream(self, messages: list[dict], model: str, **kwargs):
         import json
@@ -57,12 +58,6 @@ class ApiClient:
                     delta = chunk["choices"][0].get("delta", {})
                     if content := delta.get("content"):
                         yield content
-                    elif reasoning := (
-                        delta.get("reasoning_content")
-                        or delta.get("reasoning")
-                        or delta.get("thinking")
-                    ):
-                        yield reasoning
 
     def embed(self, texts: list[str], model: str, **kwargs) -> list[list[float]]:
         import httpx

@@ -16,7 +16,8 @@ Rules:
 - Cite sources using bracket notation [1], [2], etc.
 - If the context doesn't contain enough information, say so explicitly.
 - Do not invent information not present in the context.
-- Be concise but thorough."""
+- Be concise but thorough.
+- Output ONLY the final answer. Do NOT show any reasoning, chain-of-thought, or internal thinking — just the answer itself with citations."""
 
 # Closed-book: no retrieval context is supplied. Used by the evaluation's
 # `direct` baseline to measure the model's parametric knowledge alone.
