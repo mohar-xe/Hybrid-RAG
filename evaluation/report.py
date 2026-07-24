@@ -1,4 +1,4 @@
-"""Aggregate run results into JSON, CSV, and a human-readable markdown table.
+"""Aggregate run results into a human-readable markdown table.
 
 Pure standard-library; consumes the ``RunResult`` dictionaries produced by
 ``runner`` so it can be tested without any heavy dependencies.
@@ -6,12 +6,10 @@ Pure standard-library; consumes the ``RunResult`` dictionaries produced by
 
 from __future__ import annotations
 
-import csv
-import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Column order for the flat CSV / markdown table.
+# Column order for the markdown table.
 _COLUMNS = [
     ("config", "Config"),
     ("rerank", "Rerank"),
@@ -24,6 +22,16 @@ _COLUMNS = [
     ("latency_mean_ms", "Latency mean (ms)"),
     ("latency_p95_ms", "Latency p95 (ms)"),
 ]
+
+
+def _round_floats(obj: object, decimals: int = 4) -> object:
+    if isinstance(obj, float):
+        return round(obj, decimals)
+    if isinstance(obj, dict):
+        return {k: _round_floats(v, decimals) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_round_floats(v, decimals) for v in obj]
+    return obj
 
 
 def _fmt(value, decimals: int = 4) -> str:
@@ -40,12 +48,12 @@ def _flatten(result: dict) -> dict:
     return {
         "config": result["mode"],
         "rerank": "yes" if result["rerank"] else "no",
-        "f1": result["f1"],
-        "em": result["em"],
-        "recall": result["recall"],
-        "hit_at_k": result["hit_at_k"],
-        "answer_in_context": result["answer_in_context"],
-        "graph_lift": result.get("graph_lift"),
+        "f1": _round_floats(result["f1"]),
+        "em": _round_floats(result["em"]),
+        "recall": _round_floats(result["recall"]),
+        "hit_at_k": _round_floats(result["hit_at_k"]),
+        "answer_in_context": _round_floats(result["answer_in_context"]),
+        "graph_lift": _round_floats(result.get("graph_lift")),
         "latency_mean_ms": latency.get("mean_ms"),
         "latency_p95_ms": latency.get("p95_ms"),
     }
@@ -77,14 +85,14 @@ def to_markdown(results: list[dict], meta: dict | None = None) -> str:
     return "\n".join(preamble + lines) + "\n"
 
 
-def write_reports(
+def write_report(
     results: list[dict],
     out_dir: Path,
     *,
     meta: dict | None = None,
     stem: str | None = None,
-) -> dict[str, Path]:
-    """Write JSON + CSV + markdown reports to ``out_dir``. Returns the paths."""
+) -> Path:
+    """Write a markdown report to ``out_dir``. Returns the path."""
     out_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     stem = stem or f"eval_{timestamp}"
@@ -92,20 +100,7 @@ def write_reports(
     meta = dict(meta or {})
     meta.setdefault("generated_at", timestamp)
 
-    json_path = out_dir / f"{stem}.json"
-    csv_path = out_dir / f"{stem}.csv"
     md_path = out_dir / f"{stem}.md"
-
-    json_path.write_text(
-        json.dumps({"meta": meta, "results": results}, indent=2), encoding="utf-8"
-    )
-
-    rows = [_flatten(r) for r in results]
-    with csv_path.open("w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=[key for key, _ in _COLUMNS])
-        writer.writeheader()
-        writer.writerows(rows)
-
     md_path.write_text(to_markdown(results, meta), encoding="utf-8")
 
-    return {"json": json_path, "csv": csv_path, "markdown": md_path}
+    return md_path
