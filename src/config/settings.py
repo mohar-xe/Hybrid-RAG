@@ -174,6 +174,11 @@ class ExtractionSettings(BaseSettings):
     backend: Literal["local", "deepseek"] = "deepseek"
     base_url: str = "http://localhost:11434"
     model: str = "hgr-triplet:q4"
+    # Optional override for the eval harness's one-pass query-entity extraction
+    # (``extract_query_entities_batch``). A single bundled call handles ALL eval
+    # questions, so a stronger (slower, higher-quota) model is affordable here.
+    # When unset the NER model (``NER__MODEL``) is used.
+    query_entity_model: str | None = None
     temperature: float = 0.0
     timeout: float = 120.0
     num_ctx: int | None = None

@@ -173,6 +173,44 @@ def chunk_text(
     ]
 
 
+def chunk_texts_batch(
+    texts: list[str],
+    chunk_chars: int = CHUNK_CHARS,
+    overlap_chars: int = OVERLAP_CHARS,
+) -> list[list[ChunkDraft]]:
+    """Split many texts and embed them in ONE batched call.
+
+    ``chunk_text`` embeds per input, which turns a corpus of N paragraphs into N
+    tiny (rate-limited, per-request-priced) embedding calls. Batching the split
+    of every input first and embedding all resulting chunk strings in a single
+    ``embedder()`` pass collapses that into ``ceil(total_chunks / batch_size)``
+    HTTP requests — order-preserving per input, so callers zip results back to
+    their source texts.
+    """
+    splits: list[list[str]] = []
+    for text in texts:
+        text = _CONTROL_CHARS.sub("", (text or "").strip())
+        if not text:
+            splits.append([])
+            continue
+        atoms = _atomic_splits(text, SEPARATORS, chunk_chars)
+        splits.append(_merge_splits(atoms, chunk_chars, overlap_chars))
+
+    chunk_strs = [c for group in splits for c in group]
+    vectors = _l2_normalize(np.array(embedder(chunk_strs))) if chunk_strs else []
+
+    out: list[list[ChunkDraft]] = []
+    it = iter(vectors)
+    for group in splits:
+        out.append(
+            [
+                ChunkDraft(text=t, embedding=next(it).tolist())
+                for t in group
+            ]
+        )
+    return out
+
+
 def extract_keyphrases(text: str) -> list[str]:
     if not text:
         LOGGER.warning("Empty text passed for keyphrases extraction.")

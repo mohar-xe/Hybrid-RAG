@@ -272,6 +272,7 @@ def create_document_cluster(
     supersedes_doc_id: str | None = None,
     is_versioned: bool = False,
     version_label: str | None = None,
+    summary_embedding: list[float] | None = None,
 ) -> None:
     """Embed summary + questions via embedder, write document_clusters row
     and document_questions rows to pgvector.
@@ -284,10 +285,14 @@ def create_document_cluster(
         is_versioned: whether this document is part of a version chain.
         version_label: display label (e.g. "v2", "draft 3"). Falls back to
                        metadata['version_info'] when not explicitly provided.
+        summary_embedding: precomputed embedding for ``summary`` (batched callers
+                           embed many summaries in one API request and pass the
+                           vectors in, avoiding one request per document).
     """
     effective_version = version_label or metadata.get("version_info")
     summary = metadata.get("summary") or text[:500]
-    summary_embedding = embedder([summary])[0]
+    if summary_embedding is None:
+        summary_embedding = embedder([summary])[0]
 
     questions = metadata.get("synthetic_questions") or []
     question_embeddings = embedder(questions) if questions else []

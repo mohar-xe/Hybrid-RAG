@@ -10,10 +10,17 @@ from pathlib import Path
 _EVAL_ROOT = Path(__file__).resolve().parent
 DATA_DIR = _EVAL_ROOT / "data"
 RESULTS_DIR = _EVAL_ROOT / "results"
+CACHE_DIR = DATA_DIR / "eval_cache"   # staged-phase JSON persistence
 
 # --- Reproducibility ---
 SEED = 42
 N_QUERIES = 100
+
+# --- Staged-pipeline knobs ---
+# The eval runs in decoupled phases (artifacts -> retrieve -> generate ->
+# report), each persisted to CACHE_DIR. Generation bundles many (question,
+# context) pairs per API call; this is the batch size in pairs per call.
+GENERATION_BATCH_SIZE = 40
 
 # --- HotpotQA source (HuggingFace `datasets`) ---
 HF_DATASET = "hotpotqa/hotpot_qa"   # namespaced id (datasets>=4 rejects bare "hotpot_qa")

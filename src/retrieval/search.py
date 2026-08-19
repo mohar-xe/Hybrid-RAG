@@ -30,6 +30,7 @@ from embeddings.embedder import embedder
 from retrieval.pgvector import (
     RetrievedChunk,
     doc_level_soft_rank,
+    get_chunks_by_ids,
     _chunk_dense_search,
     _chunk_lexical_search,
     _rrf_score,
@@ -91,6 +92,7 @@ def search(
     top_k: int = 5,
     candidate_k: int = 20,
     query_embedding: list[float] | None = None,
+    query_entities: list[str] | None = None,
 ) -> RetrievalResult:
     """Run an explicitly-configured retrieval and return the top-``top_k`` chunks.
 
@@ -176,12 +178,20 @@ def search(
         siblings = structural_expansion(seed_ids)
         if siblings:
             existing = {c.chunk_id for c in chunks}
-            for chunk in siblings:
-                if chunk.chunk_id not in existing:
-                    chunks.append(chunk)
-                    existing.add(chunk.chunk_id)
+            full_siblings = {
+                s.chunk_id: s for s in get_chunks_by_ids([s[0] for s in siblings])
+            }
+            for sib_id, _text, _score in siblings:
+                sibling = full_siblings.get(sib_id)
+                if sibling is None or sibling.chunk_id in existing:
+                    continue
+                chunks.append(sibling)
+                existing.add(sibling.chunk_id)
 
-        entities = extract_query_entities(question)
+        if query_entities is None:
+            entities = extract_query_entities(question)
+        else:
+            entities = query_entities
         if entities:
             graph_facts = get_entity_context(entities)
 

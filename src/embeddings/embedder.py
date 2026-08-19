@@ -19,6 +19,7 @@ from constants.exceptions import EmbeddingError
 from config.settings import EmbeddingSettings
 from models.client import ApiClient, OllamaClient
 from models.fallback import with_fallback
+from models.rate_limiter import RateLimiter
 from cache import embedding_cache
 
 LOGGER = setup_logger(__name__)
@@ -29,6 +30,11 @@ EMBEDDING_DIM = 256
 MAX_INPUT_CHARS = 8000
 
 _settings = EmbeddingSettings()
+
+# Paces API embedding requests (``EMBEDDING__API_RATE_LIMIT``, default 1 RPM).
+# Free-tier keys throttle hard (Mistral 429s above a small burst); batching keeps
+# request counts low, and this limiter keeps the burst under the provider's cap.
+_API_LIMITER = RateLimiter(calls_per_minute=_settings.api_rate_limit)
 
 # Lazily-instantiated in-process sentence-transformers model (deployment path).
 # Module-level cache so the (heavy) model is loaded at most once per process.
@@ -74,6 +80,7 @@ def _embed_api(chunks: list[str], model: str, dim: int, batch_size: int) -> np.n
     all_embeddings: list[list[float]] = []
     for i in range(0, len(inputs), batch_size):
         batch = inputs[i : i + batch_size]
+        _API_LIMITER.acquire()
         emb = client.embed(batch, model=api_model)
         all_embeddings.extend(emb)
     return np.array(all_embeddings)[:, :dim]

@@ -1,14 +1,21 @@
 """LLM generation via any OpenAI-compatible endpoint, with Ollama fallback."""
 
+import json
 from typing import Generator
 
 from config.settings import get_settings
 from constants.logger import setup_logger
 from models.client import ApiClient, OllamaClient
 from models.fallback import with_fallback, BackendTag
+from models.rate_limiter import RateLimiter
 
 LOGGER = setup_logger(__name__)
 settings = get_settings()
+
+# Paces remote generation requests (``GENERATOR__API_RATE_LIMIT``). The eval
+# harness bundles many (question, context) pairs per call; this limiter keeps
+# per-minute token flow under the provider's TPM ceiling.
+_GENERATOR_LIMITER = RateLimiter(calls_per_minute=settings.generator.api_rate_limit)
 
 SYSTEM_PROMPT = """You are a precise research assistant. Answer the question using ONLY the provided context.
 
@@ -39,6 +46,19 @@ Rules:
 - Output ONLY the exact answer span — one or a few words.
 - Do NOT add any explanations, citations, or full sentences.
 - If you do not know the answer, output "None"."""
+
+# Bundled prompt for the eval harness's batched generation: many
+# (question, context) pairs per call, mixed RAG + closed-book, answered in one
+# JSON object. Answers stay extractive (exact spans) for exact-match/F1 scoring.
+BATCH_SYSTEM_PROMPT = """You are a precise extractive QA system. Answer EACH numbered question below.
+
+Each question may be followed by a "Context:" block. If a context is present, answer using ONLY it. If no context is given, answer from your own knowledge.
+
+Rules:
+- Output ONLY a JSON object mapping question indices (as strings: "0", "1", ...) to answers.
+- Each answer must be an exact span — one or a few words. Never full sentences, explanations, or citations.
+- For a question WITH a context: if the context does not contain the answer, output "None" (never use your own knowledge).
+- For a question WITHOUT a context: if you do not know the answer, output "None"."""
 
 
 def _build_messages(
@@ -142,3 +162,109 @@ def generate(
         _backend,
     )
     return result
+
+
+def _parse_batch_answers(content: str, count: int) -> list[str]:
+    """Parse a bundled generation response into one answer per item.
+
+    Expects ``{"0": "ans", "1": "ans", ...}``. Tolerates code fences; missing
+    entries become ``"None"`` (never raises — a garbled batch degrades to
+    ``None`` answers rather than aborting the eval).
+    """
+    content = (content or "").strip()
+    if content.startswith("```"):
+        content = (
+            content.removeprefix("```json")
+            .removeprefix("```")
+            .removesuffix("```")
+            .strip()
+        )
+    answers: list[str] = ["None"] * count
+    if not content:
+        return answers
+    try:
+        raw = json.loads(content)
+    except json.JSONDecodeError as exc:
+        LOGGER.warning("Bundled generation response unparseable: %s", exc)
+        return answers
+    if not isinstance(raw, dict):
+        LOGGER.warning(
+            "Bundled generation response not an object (%s); marking batch None.",
+            type(raw).__name__,
+        )
+        return answers
+    for key, value in raw.items():
+        try:
+            idx = int(key)
+        except (ValueError, TypeError):
+            continue
+        if 0 <= idx < count and isinstance(value, str):
+            answers[idx] = value.strip() or "None"
+    return answers
+
+
+def generate_batch(
+    items: list[tuple[str, str]],
+    *,
+    batch_size: int = 40,
+) -> list[str]:
+    """Answer many (question, context) pairs with one bundled API call per batch.
+
+    ``items`` is a list of ``(question, context)`` tuples; an empty/blank
+    context means closed-book (answer from parametric knowledge). Returns one
+    answer per item, in input order. Extractive answers (exact spans) suitable
+    for exact-match/F1 scoring. Paced by ``GENERATOR__API_RATE_LIMIT``; a failed
+    batch degrades to ``"None"`` answers without aborting the run.
+    """
+    if not items:
+        return []
+    count = len(items)
+    results: list[str | None] = [None] * count
+
+    for start in range(0, count, batch_size):
+        batch = items[start : start + batch_size]
+        blocks = []
+        for i, (question, context) in enumerate(batch):
+            if context.strip():
+                blocks.append(
+                    f"---Q{start + i}---\nContext:\n{context}\n\nQuestion: {question}"
+                )
+            else:
+                blocks.append(f"---Q{start + i}---\nQuestion: {question} (no context)")
+        user_content = "\n\n".join(blocks)
+
+        kwargs: dict = {"temperature": 0.0}
+        if settings.generator.max_tokens:
+            kwargs["max_tokens"] = settings.generator.max_tokens
+        else:
+            kwargs["max_tokens"] = max(2048, len(batch) * 96)
+        if "gemini" in settings.generator.model.lower() or "deepseek" in settings.generator.model.lower():
+            kwargs["thinking"] = {"type": "disabled"}
+
+        _GENERATOR_LIMITER.acquire()
+        try:
+            content = _api_client().chat(
+                messages=[
+                    {"role": "system", "content": BATCH_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_content},
+                ],
+                model=settings.generator.model,
+                **kwargs,
+            )
+        except Exception as exc:
+            LOGGER.error("Bundled generation batch %d failed: %s", start, exc)
+            for j in range(len(batch)):
+                results[start + j] = "None"
+            continue
+
+        parsed = _parse_batch_answers(content, len(batch))
+        for j, answer in enumerate(parsed):
+            results[start + j] = answer
+        LOGGER.info(
+            "Generated batch %d-%d (%d answers).",
+            start,
+            start + len(batch) - 1,
+            len(batch),
+        )
+
+    return [r if r is not None else "None" for r in results]

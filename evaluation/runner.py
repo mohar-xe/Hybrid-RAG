@@ -1,4 +1,4 @@
-"""Orchestrate the full evaluation: every configuration over every query.
+"""Orchestrate the staged evaluation: artifacts -> retrieve -> generate -> report.
 
 Run matrix (7 configurations):
     direct                                  (rerank N/A)
@@ -6,16 +6,33 @@ Run matrix (7 configurations):
     semantic_bm25   x {rerank, no-rerank}
     all_three       x {rerank, no-rerank}
 
-For each configuration the harness scores F1, EM, answer recall, retrieval
-hit@k ("top"), answer-in-context, and latency (retrieval / generation / total).
+The harness is **decoupled into phases**, each persisted to JSON under
+``evaluation/data/eval_cache/`` so the run is resumable and each phase can be
+recomputed independently (``--force``):
+
+    artifacts  — query embeddings (ONE batched Mistral call) + query entities
+                 (ONE bundled Gemini call) for all questions, cached.
+    retrieve   — every (config x query) cell: final reranked chunks + graph
+                 facts persisted "hot and ready"; no LLM generation involved
+                 (only the Jina reranker on the 6 RAG configs).
+    generate   — bundles ~40 (question, context) pairs per Gemini call, reading
+                 ONLY the persisted retrievals (zero retrieval work).
+    report     — scores answers + retrieval from the caches, writes markdown.
+
+Per-query latency is **not a metric** in this pipeline (decoupled phases +
+bundled generation) — the report renders it n/a and explains why; raw timings
+remain in the JSON caches for reference.
 """
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 
-from evaluation import config, metrics
-from evaluation.modes import run_query
+from evaluation import config, metrics, persist
+from evaluation.modes import generate_answers, retrieve_query
+
+TIMESTAMP = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
 @dataclass(frozen=True)
@@ -81,6 +98,141 @@ def build_run_specs(modes: list[config.ModeSpec] | None = None) -> list[RunSpec]
     return specs
 
 
+def artifacts(
+    records: list[dict],
+    *,
+    n: int = config.N_QUERIES,
+    seed: int = config.SEED,
+    force: bool = False,
+) -> tuple[dict, dict]:
+    """Phase 1: one batched embedding call + one bundled entity call, cached.
+
+    Returns ``(embeddings_by_id, entities_by_id)``; each phase file is skipped
+    when it already exists (unless ``force``).
+    """
+    from embeddings.embedder import embedder
+    from graph.entity_extraction import extract_query_entities_batch
+
+    questions = [r["question"] for r in records]
+    ids = [r["id"] for r in records]
+
+    embeddings = None if force else persist.load("query_embeddings", n, seed)
+    if embeddings is None:
+        embeddings = embedder(questions)  # ONE batched Mistral call
+        embeddings = {qid: emb for qid, emb in zip(ids, embeddings)}
+        persist.save(embeddings, "query_embeddings", n, seed)
+
+    entities = None if force else persist.load("query_entities", n, seed)
+    if entities is None:
+        extracted = extract_query_entities_batch(questions)  # ONE Gemini call
+        entities = {qid: ents for qid, ents in zip(ids, extracted)}
+        persist.save(entities, "query_entities", n, seed)
+
+    return embeddings, entities
+
+
+def retrieve(
+    records: list[dict],
+    embeddings: dict,
+    entities: dict,
+    *,
+    top_k: int = config.TOP_K,
+    candidate_k: int = config.CANDIDATE_K,
+    n: int = config.N_QUERIES,
+    seed: int = config.SEED,
+    modes: list[config.ModeSpec] | None = None,
+    force: bool = False,
+    on_progress=None,
+) -> dict:
+    """Phase 2: run every (config x query) cell; persist final reranked chunks.
+
+    Resumes: cells already in the cache are skipped. Each cell stores the
+    post-rerank, post-graph-expansion chunk texts + graph facts — "hot and
+    ready" for the generate phase. The cache is saved after every config so
+    progress survives interruption.
+    """
+    specs = build_run_specs(modes)
+    id_to_embedding = embeddings
+    id_to_entities = entities
+
+    retrievals = None if force else persist.load("retrievals", n, seed)
+    retrievals = retrievals or {}
+    retrievals = {
+        qid: {label: cell for label, cell in cells.items() if label != "direct"}
+        for qid, cells in retrievals.items()
+    }
+
+    for spec in specs:
+        label = spec.label
+        if label == "direct":
+            continue
+        done = 0
+        for record in records:
+            qid = record["id"]
+            cells = retrievals.setdefault(qid, {})
+            if label in cells:
+                done += 1
+                continue
+            outcome = retrieve_query(
+                record,
+                spec.mode_name,
+                use_vector=spec.use_vector,
+                use_bm25=spec.use_bm25,
+                use_graph=spec.use_graph,
+                rerank=spec.rerank,
+                top_k=top_k,
+                candidate_k=candidate_k,
+                query_embedding=id_to_embedding.get(qid) if spec.use_vector else None,
+                query_entities=id_to_entities.get(qid) if spec.use_graph else None,
+            )
+            cells[label] = outcome.to_dict()
+            done += 1
+            if on_progress:
+                on_progress(label, done, len(records))
+        persist.save(retrievals, "retrievals", n, seed)
+
+    return retrievals
+
+
+def generate(
+    records: list[dict],
+    retrievals: dict,
+    *,
+    batch_size: int = config.GENERATION_BATCH_SIZE,
+    n: int = config.N_QUERIES,
+    seed: int = config.SEED,
+    force: bool = False,
+) -> dict:
+    """Phase 3: bundled generation from persisted retrievals (zero retrieval work).
+
+    ~100 pairs per config / ~40 per call => ~3 Gemini calls per config (18 RAG
+    + 3 direct). Answers are persisted per (qid, label).
+    """
+    answers = None if force else persist.load("answers", n, seed)
+    if answers is not None and answers:
+        return answers
+
+    # Add the direct cells (closed-book) to the retrieval cache shape so
+    # generate_answers sees every label.
+    for record in records:
+        qid = record["id"]
+        retrievals.setdefault(qid, {}).setdefault("direct", {})
+    answers = generate_answers(records, retrievals, batch_size=batch_size)
+    persist.save(answers, "answers", n, seed)
+    return answers
+
+
+class _CellOutcome:
+    """Shim exposing the answer/retrieval view the scorer expects."""
+
+    def __init__(self, answer: str, cell_ret: dict, context: str, generation_ms: float):
+        self.answer = answer
+        self.retrieved_titles = cell_ret.get("titles", [])
+        self.contexts = [context] if context else []
+        self.retrieval_ms = float(cell_ret.get("retrieval_ms", 0.0))
+        self.generation_ms = float(generation_ms)
+
+
 def _score_run(
     spec: RunSpec, outcomes: list[tuple[dict, object]], top_k: int
 ) -> RunResult:
@@ -121,75 +273,72 @@ def _score_run(
     )
 
 
-def run_all(
-    records: list[dict],
-    *,
-    top_k: int = config.TOP_K,
-    candidate_k: int = config.CANDIDATE_K,
-    modes: list[config.ModeSpec] | None = None,
-    on_progress=None,
-) -> list[RunResult]:
-    """Run the whole matrix and return one :class:`RunResult` per configuration.
-
-    Question embeddings are computed once (a single batched pass) and reused
-    across every vector-using configuration to keep the comparison fair and
-    fast. ``on_progress(spec_label, done, total)`` is called per query if given.
-    """
-    from embeddings.embedder import embedder
-
-    questions = [r["question"] for r in records]
-    embeddings = embedder(questions)  # one batched embedding pass
-    id_to_embedding = {r["id"]: emb for r, emb in zip(records, embeddings)}
-
-    specs = build_run_specs(modes)
-    # comment above/below to use all or only three.
-    """specs = [
-        RunSpec(
-            mode_name="all_three",
-            rerank=False,
-            use_vector=True,
-            use_bm25=True,
-            use_graph=True,
-        ),
-        RunSpec(
-            mode_name="all_three",
-            rerank=True,
-            use_vector=True,
-            use_bm25=True,
-            use_graph=True,
-        ),
-    ]"""
-    results: list[RunResult] = []
-
-    for spec in specs:
-        outcomes: list[tuple[dict, object]] = []
-        for i, record in enumerate(records, start=1):
-            query_embedding = id_to_embedding[record["id"]] if spec.use_vector else None
-            outcome = run_query(
-                record,
-                spec.mode_name,
-                use_vector=spec.use_vector,
-                use_bm25=spec.use_bm25,
-                use_graph=spec.use_graph,
-                rerank=spec.rerank,
-                top_k=top_k,
-                candidate_k=candidate_k,
-                query_embedding=query_embedding,
-            )
-            outcomes.append((record, outcome))
-            if on_progress:
-                on_progress(spec.label, i, len(records))
-        results.append(_score_run(spec, outcomes, top_k))
-
-    # Compute graph lift: for each retrieval mode, compare F1 with/without graph.
-    # Semantic_bm25 and semantic share the same no-graph baseline; all_three is the
-    # only mode that adds graph. Compare all_three vs semantic_bm25 (same BM25+vector
-    # foundation, one adds graph). Delta per query then averaged.
-    all_three_results = [r for r in results if r.mode == "all_three"]
-    semantic_bm25_results = [r for r in results if r.mode == "semantic_bm25"]
-    for graph_run in all_three_results:
-        paired = [r for r in semantic_bm25_results if r.rerank == graph_run.rerank]
+def compute_graph_lift(results: list[RunResult]) -> None:
+    """In-place: F1 delta of all_three vs semantic_bm25 (same foundation)."""
+    all_three = [r for r in results if r.mode == "all_three"]
+    semantic_bm25 = [r for r in results if r.mode == "semantic_bm25"]
+    for graph_run in all_three:
+        paired = [r for r in semantic_bm25 if r.rerank == graph_run.rerank]
         if paired:
             graph_run.graph_lift = graph_run.f1 - paired[0].f1
 
+
+def score(
+    records: list[dict],
+    retrievals: dict,
+    answers: dict,
+    *,
+    top_k: int = config.TOP_K,
+    modes: list[config.ModeSpec] | None = None,
+) -> list[RunResult]:
+    """Score every config from the persisted caches (no API calls)."""
+    specs = build_run_specs(modes)
+    results: list[RunResult] = []
+
+    for spec in specs:
+        label = spec.label
+        outcomes: list[tuple[dict, object]] = []
+        for record in records:
+            qid = record["id"]
+            cell_ans = answers.get(qid, {}).get(label, {})
+            cell_ret = retrievals.get(qid, {}).get(label, {})
+            answer = cell_ans.get("answer", "")
+            context = cell_ans.get("context", "")
+            generation_ms = float(cell_ans.get("generation_ms", 0.0))
+            outcome = _CellOutcome(answer, cell_ret, context, generation_ms)
+            outcomes.append((record, outcome))
+        results.append(_score_run(spec, outcomes, top_k))
+
+    compute_graph_lift(results)
     return results
+
+
+def report(
+    records: list[dict],
+    results: list[RunResult],
+    *,
+    top_k: int = config.TOP_K,
+    graph_ingested: bool = True,
+    seed: int = config.SEED,
+    stem: str | None = None,
+) -> dict:
+    """Phase 4: write markdown report (+ raw JSON with timings) to RESULTS_DIR."""
+    from evaluation import report as report_mod
+
+    payload = [r.to_dict() for r in results]
+    meta = {
+        "n": len(records),
+        "seed": seed,
+        "top_k": top_k,
+        "graph_ingested": graph_ingested,
+        "staged": True,
+    }
+    md_path = report_mod.write_report(
+        payload, config.RESULTS_DIR, meta=meta, stem=stem
+    )
+
+    json_path = config.RESULTS_DIR / f"{md_path.stem}.json"
+    json_path.write_text(
+        report_mod._json_dumps(payload, meta), encoding="utf-8"
+    )
+    return {"md": md_path, "json": json_path, "results": payload}

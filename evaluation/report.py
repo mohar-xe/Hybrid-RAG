@@ -2,10 +2,17 @@
 
 Pure standard-library; consumes the ``RunResult`` dictionaries produced by
 ``runner`` so it can be tested without any heavy dependencies.
+
+Latency caveat: the eval runs in decoupled, cache-persisted phases (retrieval
+and generation are separate stages) and generation is bundled (~40
+question/context pairs per API call). Per-query latency is therefore **not a
+meaningful metric** here — the latency columns render ``n/a`` and raw timings
+are kept only in the sibling ``.json`` results file for reference.
 """
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -22,6 +29,18 @@ _COLUMNS = [
     ("latency_mean_ms", "Latency mean (ms)"),
     ("latency_p95_ms", "Latency p95 (ms)"),
 ]
+
+# Always included in the report: per-query latency is meaningless in the
+# staged/batched pipeline.
+LATENCY_CAVEAT = (
+    "> **Latency caveat:** this evaluation runs in decoupled, cache-persisted "
+    "phases (artifacts → retrieve → generate) and generation bundles ~40 "
+    "(question, context) pairs per API call for cost efficiency. Per-query "
+    "latency is therefore **not comparable** to an interactive RAG system: "
+    "retrieval ran in a separate phase from generation, and generation time "
+    "was amortized across bundled calls. Latency columns render `n/a`; raw "
+    "timings are preserved in the companion `.json` results file for reference."
+)
 
 
 def _round_floats(obj: object, decimals: int = 4) -> object:
@@ -43,8 +62,11 @@ def _fmt(value, decimals: int = 4) -> str:
 
 
 def _flatten(result: dict) -> dict:
-    """Flatten a RunResult dict into a single row for tabular output."""
-    latency = result.get("latency", {}) or {}
+    """Flatten a RunResult dict into a single row for tabular output.
+
+    Latency fields are always ``n/a`` (see module docstring / LATENCY_CAVEAT);
+    raw timings live in the companion JSON results file.
+    """
     return {
         "config": result["mode"],
         "rerank": "yes" if result["rerank"] else "no",
@@ -54,8 +76,8 @@ def _flatten(result: dict) -> dict:
         "hit_at_k": _round_floats(result["hit_at_k"]),
         "answer_in_context": _round_floats(result["answer_in_context"]),
         "graph_lift": _round_floats(result.get("graph_lift")),
-        "latency_mean_ms": latency.get("mean_ms"),
-        "latency_p95_ms": latency.get("p95_ms"),
+        "latency_mean_ms": "n/a",
+        "latency_p95_ms": "n/a",
     }
 
 
@@ -82,7 +104,16 @@ def to_markdown(results: list[dict], meta: dict | None = None) -> str:
                 "- _Note: graph was not ingested, so `all_three` graph facts were empty._"
             )
         preamble.append("")
+        if meta.get("staged"):
+            preamble.append(LATENCY_CAVEAT)
+            preamble.append("")
     return "\n".join(preamble + lines) + "\n"
+
+
+def _json_dumps(results: list[dict], meta: dict | None = None) -> str:
+    """Serialize results (+ meta, raw latency timings included) as pretty JSON."""
+    payload = {"meta": meta or {}, "results": results}
+    return json.dumps(payload, indent=2, default=str)
 
 
 def write_report(

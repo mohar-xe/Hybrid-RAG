@@ -10,14 +10,22 @@ On failure the configured fallback is tried (default: ollama).
 """
 
 from functools import lru_cache
+from threading import BoundedSemaphore
 
 from config.settings import get_settings
 from constants.logger import setup_logger
 from models.client import ApiClient, OllamaClient, HFClient
 from models.fallback import with_fallback
+from models.rate_limiter import RateLimiter
 
 LOGGER = setup_logger(__name__)
 settings = get_settings()
+
+# Paces remote rerank requests (``RERANKER__API_RATE_LIMIT``). Jina's free tier
+# allows 100 RPM but only 2 concurrent requests — the semaphore below enforces
+# that concurrency cap, the limiter paces the request rate.
+_RERANK_LIMITER = RateLimiter(calls_per_minute=settings.reranker.api_rate_limit)
+_RERANK_CONCURRENCY = BoundedSemaphore(2)
 
 _RERANK_PROMPT = (
     "On a scale of 0-10, how relevant is this text to the query? "
@@ -151,15 +159,17 @@ def _rerank_jina(query: str, chunks: list, top_k: int) -> list:
     model = settings.reranker.api_model or "jina-reranker-v2-base-multilingual"
     texts = [c.text for c in chunks]
 
-    resp = httpx.post(
-        base_url,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        json={"model": model, "query": query, "documents": texts, "top_n": top_k},
-        timeout=30.0,
-    )
+    _RERANK_LIMITER.acquire()
+    with _RERANK_CONCURRENCY:
+        resp = httpx.post(
+            base_url,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={"model": model, "query": query, "documents": texts, "top_n": top_k},
+            timeout=30.0,
+        )
     resp.raise_for_status()
     data = resp.json()
 

@@ -646,3 +646,124 @@ def extract_query_entities(query: str, *, use_llm_fallback: bool = True) -> list
 
     phrases = _dedupe_preserve(extract_keyphrases_yake(query))
     return phrases
+
+
+# ---------------------------------------------------------------------------
+# Batch query-entity extraction (eval harness, LLM-only)
+# ---------------------------------------------------------------------------
+# The eval harness extracts query entities for ALL eval questions up front, in
+# ONE bundled Gemini call (``EXTRACTION__QUERY_ENTITY_MODEL``, default Pro
+# Preview for quality). No YAKE — the user explicitly wants pure-LLM extraction
+# here; a missing/corrupt batch row degrades to "no graph facts" for that query
+# (the soft-boost path), never an error.
+
+
+def extract_query_entities_batch(
+    questions: list[str],
+    *,
+    model: str | None = None,
+) -> list[list[str]]:
+    """Extract entities for many questions in a single bundled LLM call.
+
+    Pure-LLM (no YAKE). One ``GEMINI_LIMITER``-paced call for all questions;
+    responses map question indices to entity arrays. Returns one list per
+    question in input order; extraction failure for a question yields ``[]``
+    (never raises), matching the soft-boost semantics of graph seeding.
+    """
+    if not questions:
+        return []
+
+    api_key = ner.api_key.get_secret_value()
+    if not api_key:
+        LOGGER.warning("NER__API_KEY not set; returning empty entities.")
+        return [[] for _ in questions]
+
+    resolved_model = model or extraction.query_entity_model or ner.model
+
+    system = (
+        "You extract the named entities and salient noun-phrase concepts from "
+        "search questions — the things a knowledge graph would index (people, "
+        "organizations, places, works, systems, models, theories, events, "
+        "methods). For EACH numbered question below, return a JSON object "
+        'mapping question indices (as strings: "0", "1", ...) to arrays of '
+        "entity surface strings exactly as a graph would store them "
+        '(e.g. {"0": ["Albert Einstein", "Nobel Prize"], "1": [...]}). '
+        "No prose, no markdown, no duplicates, no objects other than the top-level map."
+    )
+    parts = [f"Q{i}: {q}" for i, q in enumerate(questions)]
+    combined = "\n\n".join(parts)
+
+    GEMINI_LIMITER.acquire()
+
+    payload = {
+        "model": resolved_model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": combined},
+        ],
+        "temperature": ner.temperature,
+        "max_tokens": 32768,
+        "stream": False,
+    }
+
+    try:
+        response = httpx.post(
+            f"{ner.base_url.rstrip('/')}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json=payload,
+            timeout=ner.timeout,
+        )
+        response.raise_for_status()
+        content = response.json()["choices"][0]["message"]["content"]
+    except Exception as exc:
+        LOGGER.warning("Bundled query-entity extraction failed: %s", exc)
+        return [[] for _ in questions]
+
+    content = (content or "").strip()
+    if content.startswith("```"):
+        content = (
+            content.removeprefix("```json")
+            .removeprefix("```")
+            .removesuffix("```")
+            .strip()
+        )
+
+    results: list[list[str]] = [[] for _ in questions]
+    if not content:
+        return results
+
+    try:
+        raw = json.loads(content)
+    except json.JSONDecodeError as exc:
+        LOGGER.warning("Bundled query-entity response unparseable: %s", exc)
+        return results
+
+    if isinstance(raw, dict):
+        for key, items in raw.items():
+            try:
+                idx = int(key)
+            except (ValueError, TypeError):
+                continue
+            if 0 <= idx < len(questions) and isinstance(items, list):
+                results[idx] = _dedupe_preserve(
+                    [
+                        item.strip()
+                        for item in items
+                        if isinstance(item, str) and item.strip()
+                    ]
+                )
+    elif isinstance(raw, list) and all(isinstance(i, str) for i in raw):
+        # Degenerate flat-array response: assign to every question (better than
+        # nothing for the soft-boost path) — mirrors _parse_bundled_response.
+        flat = _dedupe_preserve([i.strip() for i in raw if i.strip()])
+        for idx in range(len(questions)):
+            results[idx] = flat
+
+    found = sum(1 for r in results if r)
+    LOGGER.info(
+        "Bundled query NER (%s): entities for %d/%d questions.",
+        resolved_model,
+        found,
+        len(questions),
+    )
+    return results

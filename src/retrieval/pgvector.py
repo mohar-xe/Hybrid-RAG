@@ -69,6 +69,47 @@ def _vec_literal(v: list[float]) -> str:
     return "[" + ",".join(str(x) for x in v) + "]"
 
 
+def get_chunks_by_ids(
+    chunk_ids: list[str], conn_info: str | None = None
+) -> list["RetrievedChunk"]:
+    """Fetch full chunk rows by ``chunk_id`` (order-preserving, dupes deduped).
+
+    Used by graph structural expansion: ``structural_expansion`` returns
+    ``(chunk_id, text, score)`` tuples, and callers rehydrate them into full
+    ``RetrievedChunk`` objects for context assembly. Missing ids are skipped.
+    """
+    if not chunk_ids:
+        return []
+    conninfo = conn_info or settings.database.conninfo
+    placeholders = ", ".join(["%s"] * len(chunk_ids))
+    with psycopg.connect(conninfo) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""SELECT chunk_id, text, source_id, source_type, chunk_index, doc_id
+                    FROM chunks WHERE chunk_id IN ({placeholders})""",
+                chunk_ids,
+            )
+            rows = cur.fetchall()
+    by_id = {r[0]: r for r in rows}
+    out: list["RetrievedChunk"] = []
+    for cid in chunk_ids:
+        r = by_id.get(cid)
+        if r is None:
+            continue
+        out.append(
+            RetrievedChunk(
+                chunk_id=r[0],
+                text=r[1],
+                source_id=r[2],
+                source_type=r[3],
+                chunk_index=r[4],
+                score=0.0,
+                doc_id=r[5],
+            )
+        )
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Document-level soft ranking (Stage 2)
 # ---------------------------------------------------------------------------
