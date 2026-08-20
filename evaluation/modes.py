@@ -9,7 +9,7 @@ Maps the four compared configurations onto the system's building blocks:
 
 Each retrieval configuration runs with ``rerank`` True or False.
 
-The eval harness is **staged and decoupled** (see README_RESTRUCTURE.md):
+The eval harness is **staged and decoupled** (see README.md):
 ``retrieve_query`` persists the FINAL reranked chunks — post-rerank and
 post-graph-expansion, "hot and ready" — plus graph facts and a raw timing.
 ``generate_answers`` then does *zero* retrieval work: it assembles context

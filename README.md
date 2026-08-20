@@ -220,15 +220,44 @@ uv run python demo/app.py                # http://localhost:7860
 
 ## Evaluation (HotpotQA ablation matrix)
 
-The [`evaluation/`](evaluation/) harness benchmarks each retrieval configuration *in isolation* on a **seeded** 100-question sample of HotpotQA, so the contribution of BM25, the graph, and reranking is measurable rather than assumed.
+The [`evaluation/`](evaluation/) harness benchmarks each retrieval configuration *in isolation* on a **seeded** 100-question sample of HotpotQA, so the contribution of BM25, the graph, and reranking is measurable rather than assumed. Two suites share the same 7-config matrix:
+
+- **staged** (`evaluation/`) — cost-efficient: decoupled, resumable phases, bundled API calls (~23 total for n=100), fits free-tier quotas. Latency is deliberately `n/a`.
+- **`fast_eval`** (`evaluation/fast_eval/`) — paid key, per-query generation, real latency, auto-skips ingestion when the corpus is already present, `--workers` concurrency (default 2), and reports the exact LLM-call tally (rerank excluded).
 
 ```bash
+# Staged suite (free-tier friendly):
 uv sync --extra eval                                                     # adds `datasets`
 uv run --extra eval python -m evaluation.run_eval prepare                # download + cache the seeded selection
 uv run --extra eval python -m evaluation.run_eval ingest --with-graph    # load the corpus (graph optional, slow)
 uv run --extra eval python -m evaluation.run_eval run                    # 7-config matrix → JSON/CSV/Markdown
 # or: uv run --extra eval python -m evaluation.run_eval all --with-graph
+
+# fast_eval suite (paid key, checks ingestion, real latency):
+uv run python -m evaluation.fast_eval.run                                # full ablation, workers=2 by default
 ```
+
+### Latest numbers — staged, n=100, seed 42 (`eval_20260819T194405Z`)
+
+| Config | Rerank | F1 | EM | Recall | Hit@k (top) | AnsInCtx | GraphLift |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| direct | no | 0.0000 | 0.0000 | 0.0000 | — | — | — |
+| semantic | no | 0.2665 | 0.2100 | 0.2700 | 0.8900 | 0.8600 | — |
+| semantic | yes | 0.2901 | 0.2200 | 0.2937 | 0.9450 | 0.9100 | — |
+| semantic_bm25 | no | 0.2565 | 0.2000 | 0.2600 | 0.8900 | 0.8600 | — |
+| semantic_bm25 | yes | 0.2901 | 0.2200 | 0.2937 | 0.9450 | 0.9100 | — |
+| all_three | no | 0.2715 | 0.2200 | 0.2750 | 0.9300 | 0.9100 | 0.0150 |
+| all_three | yes | 0.3028 | 0.2400 | 0.3037 | 0.9800 | 0.9500 | 0.0128 |
+
+**Read:** rerank adds +0.02–0.03 F1 and +0.04–0.06 Hit@k in every configuration; the multi-hop graph lifts Hit@k from 0.89 → 0.93 (0.945 → 0.98 reranked) — it surfaces gold supporting facts that dense+sparse miss. Latency is `n/a` here by design (bundled generation).
+
+### Latest numbers — fast_eval, real latency (paid key, measured 2026-08-20)
+
+- **Retrieval** (pgvector + BM25 + graph, fused): **50–330 ms**, p95 ≈ 0.3 s.
+- **Generation** (DeepSeek v4-flash, per query): **~1–6 s** (0.9–6.2 s observed; first call cold-starts ~30 s).
+- **Rerank** (Jina): ~1–6 s provider round-trip (10 req/min pacing).
+- **End-to-end** (`all_three` + rerank, 2 workers): typically a few seconds; sub-2 s on healthy keys.
+- **LLM-call tally** for N queries (rerank excluded): `7N` generation + `N` entity = **8N** (n=100 → 800), plus 1 batched embedding call and `3N` Jina rerank calls.
 
 It scores **F1**, **Exact Match**, **answer recall**, **retrieval hit@k**, **answer-in-context**, and **latency** (mean / median / p95), writing timestamped `JSON + CSV + Markdown` reports to `evaluation/results/`. Query selection is deterministic (`SEED = 42`) and the corpus is ingested with stable IDs, so runs are reproducible across machines. Pure-Python metric and selector logic is covered by unit tests:
 
@@ -257,7 +286,9 @@ src/
 ├── demo/            Gradio UI for interactive demos with retrieval internals
 └── pipeline.py      Typer CLI — the real entry point (ingest, ask, merge-graph)
 
-evaluation/          Reproducible HotpotQA ablation harness (+ unit tests)
+evaluation/          Two reproducible HotpotQA ablation harnesses: the staged free-tier suite
+                     (decoupled phases, bundled calls, latency n/a) and fast_eval/ (paid key,
+                     per-query latency, auto-ingest check) — see evaluation/README.md
 docs/report.md       Beginner-friendly, function-by-function walkthrough of the whole codebase
 ```
 

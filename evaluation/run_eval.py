@@ -1,7 +1,7 @@
 """Evaluation CLI — prepare data, ingest the corpus, run the staged benchmark.
 
 The benchmark runs in decoupled, cache-persisted phases (see
-``evaluation/README_RESTRUCTURE.md``):
+``evaluation/README.md``):
 
     artifacts  -> 1 batched embedding call + 1 bundled entity call (all queries)
     retrieve   -> every (config x query) cell; final reranked chunks persisted

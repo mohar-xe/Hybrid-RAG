@@ -92,6 +92,10 @@ def _api_generate(messages: list[dict]) -> str:
     kwargs = {"temperature": 0.1}
     if settings.generator.max_tokens:
         kwargs["max_tokens"] = settings.generator.max_tokens
+    # DeepSeek/Gemini reason by default unless explicitly disabled; that latency
+    # is wasted for extractive QA (matches the bundled ``generate_batch`` path).
+    if "deepseek" in settings.generator.model.lower() or "gemini" in settings.generator.model.lower():
+        kwargs["thinking"] = {"type": "disabled"}
     return _api_client().chat(
         messages=messages,
         model=settings.generator.model,
